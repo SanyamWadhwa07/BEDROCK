@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["xtask"]
+# `kernel` is deliberately NOT a workspace member: it targets x86_64-unknown-none
+# via its own .cargo/config.toml, while xtask is a normal host binary. Keeping
+# them out of one workspace avoids the two needing a single shared target.
+exclude = ["kernel"]

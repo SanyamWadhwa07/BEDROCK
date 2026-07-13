@@ -1,0 +1,5 @@
+/target
+/kernel/target
+/xtask/target
+*.img
+Cargo.lock.bak
