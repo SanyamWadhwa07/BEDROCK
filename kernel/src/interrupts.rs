@@ -21,6 +21,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.general_protection_fault
         .set_handler_fn(general_protection_fault_handler);
+    idt[PIC_1_OFFSET].set_handler_fn(crate::task::timer::timer_interrupt_handler);
     idt
 });
 

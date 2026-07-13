@@ -2,16 +2,29 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
+mod demo_tasks;
 mod framebuffer_text;
 mod gdt;
 mod interrupts;
+mod memory;
 mod serial;
 mod shell;
+mod task;
 
+use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
+use x86_64::VirtAddr;
 
-entry_point!(kernel_main);
+pub static BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config
+};
+
+entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("Bedrock kernel booting...");
@@ -30,15 +43,55 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     shell::set_mem_info(usable_bytes, region_count);
 
+    let phys_mem_offset = boot_info
+        .physical_memory_offset
+        .into_option()
+        .expect("bootloader did not map physical memory");
+    let mut mapper = unsafe { memory::paging::init(VirtAddr::new(phys_mem_offset)) };
+    let mut bump_allocator = memory::frame_allocator::BumpFrameAllocator::init(&boot_info.memory_regions);
+    memory::heap::init_heap(&mut mapper, &mut bump_allocator).expect("heap initialization failed");
+    serial_println!(
+        "Heap initialized: {} bytes at {:#x}.",
+        memory::heap::HEAP_SIZE,
+        memory::heap::HEAP_START
+    );
+
+    let bitmap_allocator = memory::frame_allocator::BitmapFrameAllocator::init(
+        &boot_info.memory_regions,
+        bump_allocator.frames_allocated(),
+    );
+    serial_println!(
+        "Frame allocator: {} free / {} total frames.",
+        bitmap_allocator.free_frame_count(),
+        bitmap_allocator.total_frame_count()
+    );
+    memory::frame_allocator::install_global(bitmap_allocator);
+    memory::paging::install_global(mapper);
+
     if let Some(fb) = boot_info.framebuffer.as_mut() {
         let info = fb.info();
         let buffer = fb.buffer_mut();
         framebuffer_text::init(buffer, info);
-        fb_println!("Bedrock kernel: Phase 1 -- boot to shell");
-        fb_println!("GDT/TSS/IDT/PIC initialized. Serial shell ready.");
+        fb_println!("Bedrock kernel: Phase 3 -- preemptive scheduler");
+        fb_println!("GDT/TSS/IDT/PIC/paging/heap/scheduler initialized.");
     } else {
         serial_println!("no framebuffer provided by bootloader");
     }
+
+    task::scheduler::init();
+    task::scheduler::spawn(demo_tasks::task_ping);
+    task::scheduler::spawn(demo_tasks::task_pong);
+    task::scheduler::spawn(demo_tasks::task_c);
+    task::scheduler::spawn(demo_tasks::task_d);
+    task::scheduler::spawn(demo_tasks::task_e);
+    serial_println!(
+        "Scheduler initialized with {} tasks (including boot task).",
+        task::scheduler::task_count()
+    );
+
+    task::timer::init_pit();
+    x86_64::instructions::interrupts::enable();
+    serial_println!("Timer armed, interrupts enabled -- preemption is now live.");
 
     serial_println!("Bedrock: entering serial shell. Try 'help'.");
     shell::run();
