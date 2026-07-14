@@ -22,8 +22,39 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.general_protection_fault
         .set_handler_fn(general_protection_fault_handler);
     idt[PIC_1_OFFSET].set_handler_fn(crate::task::timer::timer_interrupt_handler);
+    idt[KEYBOARD_VECTOR].set_handler_fn(keyboard_interrupt_handler);
+    idt[MOUSE_VECTOR].set_handler_fn(mouse_interrupt_handler);
     idt
 });
+
+pub const KEYBOARD_VECTOR: u8 = PIC_1_OFFSET + 1; // IRQ1
+pub const MOUSE_VECTOR: u8 = PIC_2_OFFSET + 4; // IRQ12
+
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let scancode = crate::input::isr_read_data_port();
+    crate::input::KEYBOARD_QUEUE.push(scancode);
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(KEYBOARD_VECTOR);
+    }
+}
+
+extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let byte = crate::input::isr_read_data_port();
+    crate::input::MOUSE_QUEUE.push(byte);
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(MOUSE_VECTOR);
+    }
+}
+
+/// Explicitly unmask exactly the IRQs we handle -- timer (0), keyboard (1),
+/// cascade (2, required for anything on the second PIC), mouse (12) -- and
+/// mask everything else, instead of trusting whatever mask state the BIOS
+/// left behind.
+pub fn unmask_irqs() {
+    unsafe {
+        PICS.lock().write_masks(0b1111_1000, 0b1110_1111);
+    }
+}
 
 pub fn init_idt() {
     IDT.load();

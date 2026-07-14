@@ -4,7 +4,10 @@ use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, S
 use x86_64::VirtAddr;
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB bootstrap heap (Stage A budget per plan)
+// 8 MiB: Phase 4's software back buffer alone is ~2.7 MB (1280x720x3), which
+// no longer fits the original 1 MiB Stage-A budget. Still bump-mapped page by
+// page at boot from Stage-A frames.
+pub const HEAP_SIZE: usize = 8 * 1024 * 1024;
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();

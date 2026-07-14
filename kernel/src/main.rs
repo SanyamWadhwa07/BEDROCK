@@ -5,10 +5,12 @@
 extern crate alloc;
 
 mod demo_tasks;
-mod framebuffer_text;
 mod gdt;
+mod graphics;
+mod input;
 mod interrupts;
 mod memory;
+mod render_demo;
 mod serial;
 mod shell;
 mod task;
@@ -71,8 +73,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if let Some(fb) = boot_info.framebuffer.as_mut() {
         let info = fb.info();
         let buffer = fb.buffer_mut();
-        framebuffer_text::init(buffer, info);
-        fb_println!("Bedrock kernel: Phase 3 -- preemptive scheduler");
+        graphics::init(buffer, info);
+        fb_println!("Bedrock kernel: Phase 4 -- framebuffer graphics");
         fb_println!("GDT/TSS/IDT/PIC/paging/heap/scheduler initialized.");
     } else {
         serial_println!("no framebuffer provided by bootloader");
@@ -84,14 +86,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::scheduler::spawn(demo_tasks::task_c);
     task::scheduler::spawn(demo_tasks::task_d);
     task::scheduler::spawn(demo_tasks::task_e);
+    task::scheduler::spawn(render_demo::render_task);
     serial_println!(
         "Scheduler initialized with {} tasks (including boot task).",
         task::scheduler::task_count()
     );
 
+    input::init_devices(); // must precede sti: consumes ACK bytes by polling
     task::timer::init_pit();
+    interrupts::unmask_irqs();
     x86_64::instructions::interrupts::enable();
-    serial_println!("Timer armed, interrupts enabled -- preemption is now live.");
+    serial_println!("Timer armed, IRQs unmasked (0/1/2/12), interrupts enabled.");
 
     serial_println!("Bedrock: entering serial shell. Try 'help'.");
     shell::run();
