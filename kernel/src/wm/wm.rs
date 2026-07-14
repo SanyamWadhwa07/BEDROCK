@@ -15,7 +15,7 @@ use crate::task::timer;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::hint::spin_loop;
-use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+use pc_keyboard::{layouts, HandleControl, Keyboard, ScancodeSet1};
 
 const RENDER_EVERY_TICKS: u64 = 3; // 100Hz PIT / 3 ~= 33fps target
 const CURSOR_SIZE: usize = 13;
@@ -95,11 +95,8 @@ pub extern "C" fn wm_task() -> ! {
         Rect::new(60, 50, 260, 150),
         WindowContent::Stats { box_x: 4, box_y: 34, vx: 3, vy: 2 },
     );
-    wm.spawn_window(
-        "Console",
-        Rect::new(360, 140, 320, 110),
-        WindowContent::Console { typed: String::new() },
-    );
+    wm.spawn_window("Terminal", Rect::new(360, 40, 340, 160), WindowContent::new_terminal());
+    wm.spawn_window("Editor", Rect::new(360, 230, 340, 180), WindowContent::new_editor());
 
     let mut keyboard = Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::Ignore);
     let mut mouse_parser = PacketParser::new();
@@ -112,26 +109,12 @@ pub extern "C" fn wm_task() -> ! {
     loop {
         let mut dirty: Vec<Rect> = Vec::new();
 
-        // --- keyboard: routed only to the focused window's Console content ---
+        // --- keyboard: routed only to the focused window ---
         while let Some(scancode) = KEYBOARD_QUEUE.pop() {
             if let Ok(Some(event)) = keyboard.add_byte(scancode) {
                 if let Some(key) = keyboard.process_keyevent(event) {
                     if let Some(fidx) = wm.focused {
-                        let rect = wm.windows[fidx].rect;
-                        if let WindowContent::Console { typed } = &mut wm.windows[fidx].content {
-                            match key {
-                                DecodedKey::Unicode('\u{8}') => {
-                                    typed.pop();
-                                }
-                                DecodedKey::Unicode('\r') | DecodedKey::Unicode('\n') => typed.clear(),
-                                DecodedKey::Unicode(c) if !c.is_control() => {
-                                    if typed.len() >= 48 {
-                                        typed.clear();
-                                    }
-                                    typed.push(c);
-                                }
-                                _ => {}
-                            }
+                        if let Some(rect) = wm.windows[fidx].handle_key(key) {
                             dirty.push(rect);
                         }
                     }

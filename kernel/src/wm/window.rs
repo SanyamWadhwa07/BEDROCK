@@ -5,10 +5,14 @@
 //! mutates content state on its own (independent of input events).
 
 use crate::demo_tasks;
+use crate::fs::simplefs;
 use crate::graphics::dirty_rect::Rect;
 use crate::graphics::{self, Color, LINE_HEIGHT};
 use alloc::format;
 use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use pc_keyboard::{DecodedKey, KeyCode};
 
 pub const TITLEBAR_HEIGHT: usize = 20;
 pub const CLOSE_BTN_SIZE: usize = 14;
@@ -26,9 +30,159 @@ pub enum WindowContent {
     /// *own* content bounds (not the screen) -- proves per-window state
     /// survives drag/resize independently of every other window.
     Stats { box_x: i32, box_y: i32, vx: i32, vy: i32 },
-    /// Typed-text echo; only receives keystrokes while focused, the
-    /// smallest possible demonstration of focus-routed input.
-    Console { typed: String },
+    /// A real command line over SimpleFS: `help`, `ls`, `cat <name>`,
+    /// `write <name> <text...>`. Only receives keystrokes while focused.
+    Terminal { input: String, history: Vec<String> },
+    /// Combined file browser + text editor: `Browsing` lists the root
+    /// directory (arrows to move, Enter to open, `n` to create a new
+    /// file); `Editing` holds the loaded buffer (F2 saves, Escape goes
+    /// back to browsing).
+    Editor(EditorState),
+}
+
+pub enum EditorState {
+    Browsing { entries: Vec<(String, u32, u32)>, selected: usize },
+    Editing { name: String, inode: u32, buf: String, status: String },
+}
+
+impl WindowContent {
+    pub fn new_terminal() -> Self {
+        WindowContent::Terminal {
+            input: String::new(),
+            history: vec![String::from("Bedrock terminal -- type 'help'.")],
+        }
+    }
+
+    pub fn new_editor() -> Self {
+        WindowContent::Editor(EditorState::Browsing { entries: simplefs::list_root(), selected: 0 })
+    }
+}
+
+/// A tiny shell over SimpleFS: `ls`/`cat`/`write` are the classic trio
+/// needed to prove read + write + directory listing all work, without
+/// building a whole command grammar.
+fn run_terminal_command(cmd: &str) -> String {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return String::new();
+    }
+    let mut parts = cmd.splitn(2, ' ');
+    let verb = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    match verb {
+        "help" => String::from("commands: help, ls, cat <name>, write <name> <text>"),
+        "ls" => {
+            let entries = simplefs::list_root();
+            if entries.is_empty() {
+                String::from("(empty)")
+            } else {
+                let mut s = String::new();
+                for (name, _, size) in entries {
+                    s.push_str(&format!("{} ({}B)\n", name, size));
+                }
+                s.trim_end().into()
+            }
+        }
+        "cat" => {
+            if rest.is_empty() {
+                return String::from("usage: cat <name>");
+            }
+            match simplefs::list_root().into_iter().find(|(n, _, _)| n == rest) {
+                Some((_, inode, _)) => match simplefs::read_file(inode) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Err(e) => format!("read error: {}", e),
+                },
+                None => format!("no such file: {}", rest),
+            }
+        }
+        "write" => {
+            let mut wparts = rest.splitn(2, ' ');
+            let name = wparts.next().unwrap_or("");
+            let text = wparts.next().unwrap_or("");
+            if name.is_empty() {
+                return String::from("usage: write <name> <text>");
+            }
+            let inode = match simplefs::list_root().into_iter().find(|(n, _, _)| n == name) {
+                Some((_, inode, _)) => Some(inode),
+                None => simplefs::create_file(name).ok(),
+            };
+            match inode {
+                Some(id) => match simplefs::write_file(id, text.as_bytes()) {
+                    Ok(()) => String::from("OK"),
+                    Err(e) => format!("write error: {}", e),
+                },
+                None => String::from("could not create file"),
+            }
+        }
+        other => format!("unknown command: {} (try 'help')", other),
+    }
+}
+
+/// Handles one keystroke for the file-browser/editor content, returning
+/// whether it changed anything (and so needs a repaint).
+fn handle_editor_key(state: &mut EditorState, key: DecodedKey) -> bool {
+    match state {
+        EditorState::Browsing { entries, selected } => match key {
+            DecodedKey::RawKey(KeyCode::ArrowUp) => {
+                *selected = selected.saturating_sub(1);
+                true
+            }
+            DecodedKey::RawKey(KeyCode::ArrowDown) => {
+                if *selected + 1 < entries.len() {
+                    *selected += 1;
+                }
+                true
+            }
+            DecodedKey::Unicode('\r') | DecodedKey::Unicode('\n') => {
+                if let Some((name, inode, _)) = entries.get(*selected).cloned() {
+                    let buf = simplefs::read_file(inode)
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        .unwrap_or_default();
+                    *state = EditorState::Editing { name, inode, buf, status: String::from("Loaded.") };
+                }
+                true
+            }
+            DecodedKey::Unicode('n') | DecodedKey::Unicode('N') => {
+                let name = format!("note{}.txt", entries.len());
+                match simplefs::create_file(&name) {
+                    Ok(inode) => {
+                        *state = EditorState::Editing { name, inode, buf: String::new(), status: String::from("New file.") };
+                    }
+                    Err(e) => crate::serial_println!("editor: create_file({}) failed: {}", name, e),
+                }
+                true
+            }
+            _ => false,
+        },
+        EditorState::Editing { inode, buf, status, .. } => match key {
+            DecodedKey::Unicode('\u{1b}') => {
+                *state = EditorState::Browsing { entries: simplefs::list_root(), selected: 0 };
+                true
+            }
+            DecodedKey::RawKey(KeyCode::F2) => {
+                *status = match simplefs::write_file(*inode, buf.as_bytes()) {
+                    Ok(()) => String::from("Saved."),
+                    Err(e) => format!("Save failed: {}", e),
+                };
+                true
+            }
+            DecodedKey::Unicode('\u{8}') => {
+                buf.pop();
+                true
+            }
+            DecodedKey::Unicode('\r') | DecodedKey::Unicode('\n') => {
+                buf.push('\n');
+                true
+            }
+            DecodedKey::Unicode(c) if !c.is_control() => {
+                if buf.len() < 4096 {
+                    buf.push(c);
+                }
+                true
+            }
+            _ => false,
+        },
+    }
 }
 
 pub struct Window {
@@ -111,6 +265,50 @@ impl Window {
         Some(old.union(&new))
     }
 
+    /// Routes one decoded keystroke into this window's content, if it
+    /// accepts keyboard input. Returns the rect to repaint, if anything
+    /// changed. Called only for the currently *focused* window -- the
+    /// smallest possible proof that keyboard focus routing works.
+    pub fn handle_key(&mut self, key: DecodedKey) -> Option<Rect> {
+        let rect = self.rect;
+        let changed = match &mut self.content {
+            WindowContent::Stats { .. } => false,
+            WindowContent::Terminal { input, history } => match key {
+                DecodedKey::Unicode('\u{8}') => {
+                    input.pop();
+                    true
+                }
+                DecodedKey::Unicode('\r') | DecodedKey::Unicode('\n') => {
+                    let cmd = core::mem::take(input);
+                    let output = run_terminal_command(&cmd);
+                    history.push(format!("> {}", cmd));
+                    for line in output.lines() {
+                        history.push(String::from(line));
+                    }
+                    const HISTORY_CAP: usize = 200;
+                    if history.len() > HISTORY_CAP {
+                        let excess = history.len() - HISTORY_CAP;
+                        history.drain(0..excess);
+                    }
+                    true
+                }
+                DecodedKey::Unicode(c) if !c.is_control() => {
+                    if input.len() < 120 {
+                        input.push(c);
+                    }
+                    true
+                }
+                _ => false,
+            },
+            WindowContent::Editor(state) => handle_editor_key(state, key),
+        };
+        if changed {
+            Some(rect)
+        } else {
+            None
+        }
+    }
+
     pub fn draw(&self, g: &mut graphics::Graphics, focused: bool) {
         let border = if focused { Color::CYAN } else { Color::rgb(80, 84, 100) };
         let titlebar_bg = if focused { Color::rgb(40, 70, 90) } else { Color::rgb(35, 37, 46) };
@@ -155,10 +353,52 @@ impl Window {
                 let by = (cr.y as i32 + *box_y).max(0) as usize;
                 g.fill_rect(Rect::new(bx, by, BOX_SIZE as usize, BOX_SIZE as usize), Color::ORANGE);
             }
-            WindowContent::Console { typed } => {
-                let prefix = if focused { "> " } else { "  " };
-                let line = format!("{}{}", prefix, typed);
-                g.draw_string(cr.x + 4, cr.y + 4, &line, Color::CYAN, Color::BG);
+            WindowContent::Terminal { input, history } => {
+                let max_lines = cr.h.saturating_sub(4) / LINE_HEIGHT;
+                let total_lines = history.len() + 1; // +1 for the live input line
+                let skip = total_lines.saturating_sub(max_lines).min(history.len());
+                let mut y = cr.y + 4;
+                for line in history.iter().skip(skip) {
+                    if y + LINE_HEIGHT > cr.bottom() {
+                        break;
+                    }
+                    g.draw_string(cr.x + 4, y, line, Color::GREEN, Color::BG);
+                    y += LINE_HEIGHT;
+                }
+                let prompt_color = if focused { Color::WHITE } else { Color::rgb(120, 122, 130) };
+                let prompt = format!("{}{}", if focused { "> " } else { "  " }, input);
+                if y + LINE_HEIGHT <= cr.bottom() {
+                    g.draw_string(cr.x + 4, y, &prompt, prompt_color, Color::BG);
+                }
+            }
+            WindowContent::Editor(EditorState::Browsing { entries, selected }) => {
+                g.draw_string(cr.x + 4, cr.y + 4, "Enter=open  N=new  arrows=move", Color::CYAN, Color::BG);
+                let mut y = cr.y + 4 + LINE_HEIGHT;
+                if entries.is_empty() {
+                    g.draw_string(cr.x + 4, y, "(no files yet -- press N)", Color::WHITE, Color::BG);
+                }
+                for (i, (name, _, size)) in entries.iter().enumerate() {
+                    if y + LINE_HEIGHT > cr.bottom() {
+                        break;
+                    }
+                    let marker = if i == *selected { ">" } else { " " };
+                    let color = if i == *selected { Color::ORANGE } else { Color::WHITE };
+                    let line = format!("{} {} ({}B)", marker, name, size);
+                    g.draw_string(cr.x + 4, y, &line, color, Color::BG);
+                    y += LINE_HEIGHT;
+                }
+            }
+            WindowContent::Editor(EditorState::Editing { name, buf, status, .. }) => {
+                let header = format!("Editing {}  (F2=save  Esc=back)  {}", name, status);
+                g.draw_string(cr.x + 4, cr.y + 4, &header, Color::CYAN, Color::BG);
+                let mut y = cr.y + 4 + LINE_HEIGHT;
+                for line in buf.split('\n') {
+                    if y + LINE_HEIGHT > cr.bottom() {
+                        break;
+                    }
+                    g.draw_string(cr.x + 4, y, line, Color::WHITE, Color::BG);
+                    y += LINE_HEIGHT;
+                }
             }
         }
     }

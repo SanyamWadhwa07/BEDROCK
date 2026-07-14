@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod demo_tasks;
+mod fs;
 mod gdt;
 mod graphics;
 mod input;
@@ -70,11 +71,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     memory::frame_allocator::install_global(bitmap_allocator);
     memory::paging::install_global(mapper);
 
+    fs::simplefs::init();
+
     if let Some(fb) = boot_info.framebuffer.as_mut() {
         let info = fb.info();
         let buffer = fb.buffer_mut();
         graphics::init(buffer, info);
-        fb_println!("Bedrock kernel: Phase 6 -- window manager");
+        fb_println!("Bedrock kernel: Phase 7 -- native apps + real filesystem");
         fb_println!("GDT/TSS/IDT/PIC/paging/heap/scheduler initialized.");
     } else {
         serial_println!("no framebuffer provided by bootloader");
