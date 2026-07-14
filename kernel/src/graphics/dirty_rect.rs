@@ -42,6 +42,10 @@ impl Rect {
         Rect::new(x, y, right - x, bottom - y)
     }
 
+    pub fn contains(&self, x: usize, y: usize) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+
     pub fn clamp_to(&self, width: usize, height: usize) -> Rect {
         let x = self.x.min(width);
         let y = self.y.min(height);

@@ -10,10 +10,10 @@ mod graphics;
 mod input;
 mod interrupts;
 mod memory;
-mod render_demo;
 mod serial;
 mod shell;
 mod task;
+mod wm;
 
 use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{entry_point, BootInfo};
@@ -74,7 +74,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         let info = fb.info();
         let buffer = fb.buffer_mut();
         graphics::init(buffer, info);
-        fb_println!("Bedrock kernel: Phase 4 -- framebuffer graphics");
+        fb_println!("Bedrock kernel: Phase 6 -- window manager");
         fb_println!("GDT/TSS/IDT/PIC/paging/heap/scheduler initialized.");
     } else {
         serial_println!("no framebuffer provided by bootloader");
@@ -86,7 +86,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::scheduler::spawn(demo_tasks::task_c);
     task::scheduler::spawn(demo_tasks::task_d);
     task::scheduler::spawn(demo_tasks::task_e);
-    task::scheduler::spawn(render_demo::render_task);
+    task::scheduler::spawn(wm::wm_task);
     serial_println!(
         "Scheduler initialized with {} tasks (including boot task).",
         task::scheduler::task_count()
