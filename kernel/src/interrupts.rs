@@ -24,11 +24,25 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt[PIC_1_OFFSET].set_handler_fn(crate::task::timer::timer_interrupt_handler);
     idt[KEYBOARD_VECTOR].set_handler_fn(keyboard_interrupt_handler);
     idt[MOUSE_VECTOR].set_handler_fn(mouse_interrupt_handler);
+    idt[COM1_VECTOR].set_handler_fn(serial_interrupt_handler);
     idt
 });
 
 pub const KEYBOARD_VECTOR: u8 = PIC_1_OFFSET + 1; // IRQ1
+pub const COM1_VECTOR: u8 = PIC_1_OFFSET + 4; // IRQ4
 pub const MOUSE_VECTOR: u8 = PIC_2_OFFSET + 4; // IRQ12
+
+/// Drains every byte the UART has buffered, not just one: a single IRQ4 can
+/// cover several bytes that arrived close together, and leaving any behind
+/// would stall the interrupt (the 16550 only re-asserts on a fresh arrival).
+extern "x86-interrupt" fn serial_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    while crate::serial::byte_ready() {
+        crate::serial::SERIAL_QUEUE.push(crate::serial::isr_read_byte());
+    }
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(COM1_VECTOR);
+    }
+}
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let scancode = crate::input::isr_read_data_port();
@@ -40,6 +54,12 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let byte = crate::input::isr_read_data_port();
+    // Stamp before pushing: input latency is measured from the moment the
+    // hardware byte was claimed, not from whenever the WM drains the queue.
+    crate::metrics::MOUSE_ISR_TSC.store(
+        crate::task::timer::rdtsc(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
     crate::input::MOUSE_QUEUE.push(byte);
     unsafe {
         PICS.lock().notify_end_of_interrupt(MOUSE_VECTOR);
@@ -47,12 +67,12 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
 }
 
 /// Explicitly unmask exactly the IRQs we handle -- timer (0), keyboard (1),
-/// cascade (2, required for anything on the second PIC), mouse (12) -- and
-/// mask everything else, instead of trusting whatever mask state the BIOS
-/// left behind.
+/// cascade (2, required for anything on the second PIC), COM1 serial (4),
+/// mouse (12) -- and mask everything else, instead of trusting whatever mask
+/// state the BIOS left behind. A 0 bit means "unmasked".
 pub fn unmask_irqs() {
     unsafe {
-        PICS.lock().write_masks(0b1111_1000, 0b1110_1111);
+        PICS.lock().write_masks(0b1110_1000, 0b1110_1111);
     }
 }
 

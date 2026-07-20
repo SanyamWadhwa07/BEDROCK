@@ -5,7 +5,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use bootloader_api::info::{FrameBufferInfo, PixelFormat};
 use dirty_rect::{DirtyTracker, Rect};
-use noto_sans_mono_bitmap::{get_raster, get_raster_width, FontWeight, RasterHeight, RasterizedChar};
+use noto_sans_mono_bitmap::{
+    get_raster, get_raster_width, FontWeight, RasterHeight, RasterizedChar,
+};
 use spin::Mutex;
 
 #[derive(Debug, Clone, Copy)]
@@ -107,7 +109,11 @@ impl Graphics {
         let raster = char_raster(c);
         for (dy, row) in raster.raster().iter().enumerate() {
             for (dx, &intensity) in row.iter().enumerate() {
-                let color = if intensity == 0 { bg } else { fg.scaled(intensity) };
+                let color = if intensity == 0 {
+                    bg
+                } else {
+                    fg.scaled(intensity)
+                };
                 self.set_pixel(x + dx, y + dy, color);
             }
         }
@@ -125,7 +131,8 @@ impl Graphics {
 
     #[allow(dead_code)] // used from Phase 5 on (cursor sprite drawn via set_pixel)
     pub fn mark_dirty(&mut self, rect: Rect) {
-        self.dirty.mark(rect.clamp_to(self.info.width, self.info.height));
+        self.dirty
+            .mark(rect.clamp_to(self.info.width, self.info.height));
     }
 
     /// Copies all merged dirty rects from the back buffer to the real

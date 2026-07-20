@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings are failures in CI. The kernel builds clean today; keeping it
+  # that way is the point, since a stray `unused` on bare metal is often a
+  # code path that silently stopped being reachable.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The pure-logic crates under libs/ are no_std but host-buildable
+  # precisely so they can be tested here without QEMU: the LRU block cache,
+  # the dirty-rect union, the PS/2 packet FSM, and the frame bitmap.
+  host-tests:
+    name: Host tests (libs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the nightly; the action honours it, and the
+      # pin matters -- see PLAN.md's notes on bootloader/toolchain churn.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-02-15
+          components: rustfmt, clippy, rust-src, llvm-tools-preview
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+  # The kernel is excluded from the root workspace (it cross-compiles to
+  # x86_64-unknown-none via its own .cargo/config.toml), so it needs its own
+  # step. This proves the bare-metal target still builds; behaviour is
+  # verified by booting it in QEMU, which is documented in PLAN.md rather
+  # than automated here.
+  kernel-build:
+    name: Kernel cross-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-02-15
+          components: rustfmt, clippy, rust-src, llvm-tools-preview
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kernel
+
+      - name: Format
+        working-directory: kernel
+        run: cargo fmt -- --check
+
+      # `--bins`, not `--all-targets`: building a test target for
+      # x86_64-unknown-none fails on `can't find crate for 'test'`, since
+      # libtest needs a std that this target has no business having.
+      - name: Clippy (bare metal)
+        working-directory: kernel
+        run: cargo clippy --bins
+
+      - name: Build kernel
+        working-directory: kernel
+        run: cargo build --release
+
+      - name: Build bootable disk image
+        run: cargo run -p xtask -- build --release

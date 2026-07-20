@@ -1,5 +1,4 @@
-use alloc::vec;
-use alloc::vec::Vec;
+use bedrock_mm::FrameBitmap;
 use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
 use spin::Mutex;
 use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB};
@@ -46,32 +45,40 @@ unsafe impl FrameAllocator<Size4KiB> for BumpFrameAllocator {
     }
 }
 
-/// Stage B: a bitset allocator (1 bit per 4KiB frame, the classic
-/// bit-manipulation DSA structure -- packed into `u8` words, indexed via
-/// `idx/8` + `1 << (idx%8)`) covering physical memory from address 0 up to
+/// Stage B: a bitset allocator covering physical memory from address 0 up to
 /// the end of the highest usable/bootloader region. Built from the heap (so
 /// it needs the heap to already exist), promoting from `BumpFrameAllocator`
-/// by marking every frame Stage A already handed out as used. Allocation
-/// scans from a rotating cursor (`next_hint`) rather than restarting at 0
-/// each time, avoiding an O(n) walk on every call in the common case.
+/// by marking every frame Stage A already handed out as used.
+///
+/// The bit manipulation itself (1 bit per 4KiB frame packed into `u8` words,
+/// the rotating scan cursor, the free-count bookkeeping) lives in the
+/// `bedrock-mm` crate, where it is host-testable under ordinary `cargo test`
+/// -- including a randomized test asserting the property this kernel's
+/// stability rests on: a frame is never handed out twice before being freed.
+/// What stays here is only the part that genuinely needs the target: the
+/// bootloader memory-map walk and the frame-index <-> `PhysAddr` arithmetic.
 pub struct BitmapFrameAllocator {
-    bitmap: Vec<u8>,
-    frame_count: usize,
-    next_hint: usize,
+    bitmap: FrameBitmap,
 }
 
 impl BitmapFrameAllocator {
     pub fn init(memory_map: &'static MemoryRegions, frames_already_allocated: usize) -> Self {
         let highest_addr = memory_map
             .iter()
-            .filter(|r| matches!(r.kind, MemoryRegionKind::Usable | MemoryRegionKind::Bootloader))
+            .filter(|r| {
+                matches!(
+                    r.kind,
+                    MemoryRegionKind::Usable | MemoryRegionKind::Bootloader
+                )
+            })
             .map(|r| r.end)
             .max()
             .unwrap_or(0);
         let frame_count = (highest_addr / FRAME_SIZE) as usize;
-        // Default every frame to "used"; only usable frames beyond what
-        // Stage A already consumed get cleared to "free" below.
-        let mut bitmap = vec![0xffu8; frame_count.div_ceil(8)];
+        // Every frame starts marked "used"; only usable frames beyond what
+        // Stage A already consumed get freed below. Defaulting to "used"
+        // means a frame missing from the memory map is never handed out.
+        let mut bitmap = FrameBitmap::new_all_allocated(frame_count);
 
         let mut usable_index = 0usize;
         for region in memory_map
@@ -80,63 +87,39 @@ impl BitmapFrameAllocator {
         {
             let mut addr = region.start;
             while addr < region.end {
-                let frame_idx = (addr / FRAME_SIZE) as usize;
                 if usable_index >= frames_already_allocated {
-                    Self::clear_bit(&mut bitmap, frame_idx);
+                    bitmap.set_free((addr / FRAME_SIZE) as usize);
                 }
                 usable_index += 1;
                 addr += FRAME_SIZE;
             }
         }
 
-        Self {
-            bitmap,
-            frame_count,
-            next_hint: 0,
-        }
-    }
-
-    fn is_free(&self, idx: usize) -> bool {
-        (self.bitmap[idx / 8] & (1 << (idx % 8))) == 0
-    }
-
-    fn set_bit(bitmap: &mut [u8], idx: usize) {
-        bitmap[idx / 8] |= 1 << (idx % 8);
-    }
-
-    fn clear_bit(bitmap: &mut [u8], idx: usize) {
-        bitmap[idx / 8] &= !(1 << (idx % 8));
+        Self { bitmap }
     }
 
     pub fn free_frame_count(&self) -> usize {
-        (0..self.frame_count).filter(|&i| self.is_free(i)).count()
+        self.bitmap.free_count()
     }
 
     pub fn total_frame_count(&self) -> usize {
-        self.frame_count
+        self.bitmap.frame_count()
     }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        for offset in 0..self.frame_count {
-            let idx = (self.next_hint + offset) % self.frame_count;
-            if self.is_free(idx) {
-                Self::set_bit(&mut self.bitmap, idx);
-                self.next_hint = idx + 1;
-                return Some(PhysFrame::containing_address(PhysAddr::new(
-                    idx as u64 * FRAME_SIZE,
-                )));
-            }
-        }
-        None
+        let idx = self.bitmap.alloc()?;
+        Some(PhysFrame::containing_address(PhysAddr::new(
+            idx as u64 * FRAME_SIZE,
+        )))
     }
 }
 
 impl FrameDeallocator<Size4KiB> for BitmapFrameAllocator {
     unsafe fn deallocate_frame(&mut self, frame: PhysFrame) {
-        let idx = (frame.start_address().as_u64() / FRAME_SIZE) as usize;
-        Self::clear_bit(&mut self.bitmap, idx);
+        self.bitmap
+            .free((frame.start_address().as_u64() / FRAME_SIZE) as usize);
     }
 }
 
@@ -163,7 +146,10 @@ pub fn total_frame_count() -> usize {
 }
 
 pub fn alloc_frame() -> Option<PhysFrame> {
-    FRAME_ALLOCATOR.lock().as_mut().and_then(|a| a.allocate_frame())
+    FRAME_ALLOCATOR
+        .lock()
+        .as_mut()
+        .and_then(|a| a.allocate_frame())
 }
 
 /// # Safety

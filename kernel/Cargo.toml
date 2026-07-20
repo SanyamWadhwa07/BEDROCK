@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bedrock-gfx = { path = "../libs/bedrock-gfx" }
+bedrock-input = { path = "../libs/bedrock-input" }
+bedrock-lru = { path = "../libs/bedrock-lru" }
+bedrock-mm = { path = "../libs/bedrock-mm" }
 bootloader_api = "0.11"
 uart_16550 = "0.3"
 spin = "0.9"

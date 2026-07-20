@@ -1,0 +1,7 @@
+[package]
+name = "bedrock-gfx"
+version = "0.1.0"
+edition = "2021"
+description = "Rectangle algebra and dirty-rectangle union tracking for the Bedrock compositor. no_std, allocation-free, host-testable."
+
+[dependencies]

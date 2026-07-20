@@ -1,5 +1,5 @@
 use super::context_switch::switch_to;
-use super::tcb::{alloc_task_stack, prepare_initial_stack, Tcb, TaskId, TaskState};
+use super::tcb::{alloc_task_stack, prepare_initial_stack, TaskId, TaskState, Tcb};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -12,6 +12,9 @@ struct SchedulerState {
     tasks: Vec<Tcb>,
     ready_queue: VecDeque<usize>,
     current: usize,
+    /// Tick at which the running task was last credited, so `ticks_run` can
+    /// be charged by actual elapsed time rather than an assumed full slice.
+    last_accounted_tick: u64,
 }
 
 static SCHEDULER: Mutex<Option<SchedulerState>> = Mutex::new(None);
@@ -24,11 +27,14 @@ pub fn init() {
         id: 0,
         saved_rsp: 0, // filled in by the first switch_to that saves *out of* task 0
         state: TaskState::Running,
+        switches: 0,
+        ticks_run: 0,
     };
     *SCHEDULER.lock() = Some(SchedulerState {
         tasks: alloc::vec![boot_task],
         ready_queue: VecDeque::new(),
         current: 0,
+        last_accounted_tick: 0,
     });
 }
 
@@ -44,6 +50,8 @@ pub fn spawn(entry: extern "C" fn() -> !) -> TaskId {
         id,
         saved_rsp,
         state: TaskState::Ready,
+        switches: 0,
+        ticks_run: 0,
     });
     s.ready_queue.push_back(s.tasks.len() - 1);
     id
@@ -53,8 +61,27 @@ pub fn spawn(entry: extern "C" fn() -> !) -> TaskId {
 /// to the next ready task. If nothing else is ready, returns immediately
 /// without switching.
 pub fn schedule() {
-    let mut guard = SCHEDULER.lock();
+    // try_lock, not lock: this runs inside the timer ISR. If the interrupted
+    // task was holding the scheduler lock (spawn, task_stats, ...), spinning
+    // here would deadlock the whole single-core machine -- the holder can
+    // never run again to release it. Skipping one reschedule opportunity and
+    // retrying next slice is always safe.
+    let Some(mut guard) = SCHEDULER.try_lock() else {
+        return;
+    };
     let s = guard.as_mut().expect("scheduler not initialized");
+
+    // Credit the outgoing task with the ticks that actually elapsed while it
+    // held the CPU, whether or not anything else is ready to take over.
+    // Charging a fixed TIME_SLICE_TICKS here instead would overcount: a
+    // reschedule that a failed try_lock skipped, or one that ran with
+    // interrupts disabled for a while, does not correspond to exactly one
+    // slice -- and the per-task totals then sum to more than the machine's
+    // uptime, which makes the reported cpu% meaningless.
+    let current = s.current;
+    let now = super::timer::ticks();
+    s.tasks[current].ticks_run += now.saturating_sub(s.last_accounted_tick);
+    s.last_accounted_tick = now;
 
     let Some(next) = s.ready_queue.pop_front() else {
         return; // nothing else is ready
@@ -64,10 +91,10 @@ pub fn schedule() {
         return;
     }
 
-    let current = s.current;
     s.tasks[current].state = TaskState::Ready;
     s.ready_queue.push_back(current);
     s.tasks[next].state = TaskState::Running;
+    s.tasks[next].switches += 1;
     s.current = next;
 
     let prev_rsp_out = &mut s.tasks[current].saved_rsp as *mut u64;
@@ -91,10 +118,33 @@ pub fn task_count() -> usize {
         .unwrap_or(0)
 }
 
-pub fn task_ids() -> Vec<TaskId> {
+/// A snapshot of one task's scheduling counters, for the `tasks` shell
+/// command and the Stats window.
+#[derive(Clone, Copy)]
+pub struct TaskStat {
+    pub id: TaskId,
+    pub state: TaskState,
+    pub switches: u64,
+    pub ticks_run: u64,
+}
+
+pub fn task_stats() -> Vec<TaskStat> {
+    // Interrupts off while holding the lock would also work, but try-locking
+    // in schedule() already makes ISR-vs-task contention safe; a plain lock
+    // here just briefly delays one reschedule at worst.
     SCHEDULER
         .lock()
         .as_ref()
-        .map(|s| s.tasks.iter().map(|t| t.id).collect())
+        .map(|s| {
+            s.tasks
+                .iter()
+                .map(|t| TaskStat {
+                    id: t.id,
+                    state: t.state,
+                    switches: t.switches,
+                    ticks_run: t.ticks_run,
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }

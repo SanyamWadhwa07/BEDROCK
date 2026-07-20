@@ -1,0 +1,7 @@
+[package]
+name = "bedrock-mm"
+version = "0.1.0"
+edition = "2021"
+description = "Bitset physical-frame allocator core: 1 bit per frame, rotating-cursor scan. no_std, address-type-free, host-testable."
+
+[dependencies]

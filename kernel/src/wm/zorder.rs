@@ -53,11 +53,10 @@ impl ZOrder {
     /// Top-down point hit test: the frontmost window containing the point
     /// wins, even if others behind it also contain it.
     pub fn hit_test(&self, windows: &[Window], x: usize, y: usize) -> Option<usize> {
-        for &idx in self.order.iter().rev() {
-            if windows[idx].rect.contains(x, y) {
-                return Some(idx);
-            }
-        }
-        None
+        self.order
+            .iter()
+            .rev()
+            .find(|&&idx| windows[idx].rect.contains(x, y))
+            .copied()
     }
 }

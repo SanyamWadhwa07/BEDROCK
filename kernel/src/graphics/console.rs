@@ -13,7 +13,10 @@ struct ConsoleState {
     y: usize,
 }
 
-static CONSOLE: Mutex<ConsoleState> = Mutex::new(ConsoleState { x: BORDER, y: BORDER });
+static CONSOLE: Mutex<ConsoleState> = Mutex::new(ConsoleState {
+    x: BORDER,
+    y: BORDER,
+});
 
 struct ConsoleWriter;
 

@@ -15,6 +15,13 @@ pub struct Tcb {
     pub id: TaskId,
     pub saved_rsp: u64,
     pub state: TaskState,
+    /// Times this task has been switched *into*.
+    pub switches: u64,
+    /// PIT ticks this task has spent running. Credited by `schedule()` from
+    /// the actual tick delta since the last accounting point, so the totals
+    /// across all tasks track the machine's uptime. Resolution is still one
+    /// tick (10ms) -- the scheduler only observes tasks on tick boundaries.
+    pub ticks_run: u64,
 }
 
 const STACK_PAGES: u64 = 8; // 32 KiB per task -- plenty for these demo tasks
@@ -40,11 +47,17 @@ pub fn alloc_task_stack() -> VirtAddr {
         let start_page = Page::<Size4KiB>::containing_address(stack_start);
         let end_page = Page::<Size4KiB>::containing_address(stack_end);
         for page in Page::range_inclusive(start_page, end_page) {
-            let frame = frame_allocator::alloc_frame().expect("out of physical frames for task stack");
+            let frame =
+                frame_allocator::alloc_frame().expect("out of physical frames for task stack");
             let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
             unsafe {
                 mapper
-                    .map_to(page, frame, flags, &mut frame_allocator::GlobalFrameAllocator)
+                    .map_to(
+                        page,
+                        frame,
+                        flags,
+                        &mut frame_allocator::GlobalFrameAllocator,
+                    )
                     .expect("failed to map task stack page")
                     .flush();
             }

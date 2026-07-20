@@ -21,8 +21,14 @@ const RENDER_EVERY_TICKS: u64 = 3; // 100Hz PIT / 3 ~= 33fps target
 const CURSOR_SIZE: usize = 13;
 
 enum Drag {
-    Move { window: usize, grab_dx: i32, grab_dy: i32 },
-    Resize { window: usize },
+    Move {
+        window: usize,
+        grab_dx: i32,
+        grab_dy: i32,
+    },
+    Resize {
+        window: usize,
+    },
 }
 
 struct WindowManager {
@@ -93,18 +99,47 @@ pub extern "C" fn wm_task() -> ! {
     wm.spawn_window(
         "Stats",
         Rect::new(60, 50, 260, 150),
-        WindowContent::Stats { box_x: 4, box_y: 34, vx: 3, vy: 2 },
+        WindowContent::Stats {
+            box_x: 4,
+            box_y: 34,
+            vx: 3,
+            vy: 2,
+        },
     );
-    wm.spawn_window("Terminal", Rect::new(360, 40, 340, 160), WindowContent::new_terminal());
-    wm.spawn_window("Editor", Rect::new(360, 230, 340, 180), WindowContent::new_editor());
+    wm.spawn_window(
+        "Terminal",
+        Rect::new(360, 40, 340, 160),
+        WindowContent::new_terminal(),
+    );
+    wm.spawn_window(
+        "Editor",
+        Rect::new(360, 230, 340, 180),
+        WindowContent::new_editor(),
+    );
 
-    let mut keyboard = Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::Ignore);
+    let mut keyboard = Keyboard::new(
+        ScancodeSet1::new(),
+        layouts::Us104Key,
+        HandleControl::Ignore,
+    );
     let mut mouse_parser = PacketParser::new();
     let mut cursor_x: i32 = (screen_w / 2) as i32;
     let mut cursor_y: i32 = (screen_h / 2) as i32;
-    let mut prev_cursor = Rect::new(cursor_x as usize, cursor_y as usize, CURSOR_SIZE, CURSOR_SIZE);
+    let mut prev_cursor = Rect::new(
+        cursor_x as usize,
+        cursor_y as usize,
+        CURSOR_SIZE,
+        CURSOR_SIZE,
+    );
     let mut buttons: u8 = 0;
     let mut last_render_tick = 0u64;
+
+    // Metrics bookkeeping: FPS is counted over ~1s windows of PIT ticks;
+    // input latency carries the IRQ-time TSC stamp of the first mouse
+    // packet of the frame through to just after present.
+    let mut fps_window_start = timer::ticks();
+    let mut frames_in_window = 0u64;
+    let mut pending_input_tsc: Option<u64> = None;
 
     loop {
         let mut dirty: Vec<Rect> = Vec::new();
@@ -125,6 +160,11 @@ pub extern "C" fn wm_task() -> ! {
         // --- mouse: hit-test, drag/resize, focus/raise, close ---
         while let Some(byte) = MOUSE_QUEUE.pop() {
             if let Some(ev) = mouse_parser.feed(byte) {
+                if pending_input_tsc.is_none() {
+                    pending_input_tsc = Some(
+                        crate::metrics::MOUSE_ISR_TSC.load(core::sync::atomic::Ordering::Relaxed),
+                    );
+                }
                 cursor_x = (cursor_x + ev.dx as i32).clamp(0, screen_w as i32 - 1);
                 cursor_y = (cursor_y + ev.dy as i32).clamp(0, screen_h as i32 - 1);
                 let cx = cursor_x as usize;
@@ -134,12 +174,17 @@ pub extern "C" fn wm_task() -> ! {
 
                 if let Some(d) = &wm.drag {
                     match *d {
-                        Drag::Move { window, grab_dx, grab_dy } => {
+                        Drag::Move {
+                            window,
+                            grab_dx,
+                            grab_dy,
+                        } => {
                             let old = wm.windows[window].rect;
                             let win_w = old.w;
-                            let nx = (cursor_x - grab_dx).clamp(0, (screen_w as i32 - win_w as i32).max(0));
-                            let ny =
-                                (cursor_y - grab_dy).clamp(0, (screen_h as i32 - TITLEBAR_HEIGHT as i32).max(0));
+                            let nx = (cursor_x - grab_dx)
+                                .clamp(0, (screen_w as i32 - win_w as i32).max(0));
+                            let ny = (cursor_y - grab_dy)
+                                .clamp(0, (screen_h as i32 - TITLEBAR_HEIGHT as i32).max(0));
                             wm.windows[window].rect.x = nx as usize;
                             wm.windows[window].rect.y = ny as usize;
                             dirty.push(old.union(&wm.windows[window].rect));
@@ -147,7 +192,8 @@ pub extern "C" fn wm_task() -> ! {
                         Drag::Resize { window } => {
                             let old = wm.windows[window].rect;
                             let new_w = ((cx as i32 - old.x as i32).max(MIN_WIDTH as i32)) as usize;
-                            let new_h = ((cy as i32 - old.y as i32).max(MIN_HEIGHT as i32)) as usize;
+                            let new_h =
+                                ((cy as i32 - old.y as i32).max(MIN_HEIGHT as i32)) as usize;
                             let win = &mut wm.windows[window];
                             win.rect.w = new_w.min(screen_w.saturating_sub(win.rect.x));
                             win.rect.h = new_h.min(screen_h.saturating_sub(win.rect.y));
@@ -173,7 +219,11 @@ pub extern "C" fn wm_task() -> ! {
                             let grab_dx = cursor_x - win_rect.x as i32;
                             let grab_dy = cursor_y - win_rect.y as i32;
                             wm.focus(idx);
-                            wm.drag = Some(Drag::Move { window: idx, grab_dx, grab_dy });
+                            wm.drag = Some(Drag::Move {
+                                window: idx,
+                                grab_dx,
+                                grab_dy,
+                            });
                             dirty.push(win_rect);
                         } else {
                             wm.focus(idx);
@@ -200,10 +250,23 @@ pub extern "C" fn wm_task() -> ! {
 
         // Cursor is redrawn every frame (cheap: two thin bars) so it never
         // leaves a trail regardless of what else did or didn't move.
-        let new_cursor = Rect::new(cursor_x.max(0) as usize, cursor_y.max(0) as usize, CURSOR_SIZE, CURSOR_SIZE);
+        let new_cursor = Rect::new(
+            cursor_x.max(0) as usize,
+            cursor_y.max(0) as usize,
+            CURSOR_SIZE,
+            CURSOR_SIZE,
+        );
         dirty.push(prev_cursor.union(&new_cursor));
 
+        // The measurable strawman: `redraw naive` on the serial shell makes
+        // every frame repaint the whole screen, so dirty-rect compositing
+        // has a live baseline to beat (compare `metrics` frame times).
+        if crate::metrics::FORCE_FULL_REDRAW.load(core::sync::atomic::Ordering::Relaxed) {
+            dirty.push(Rect::new(0, 0, screen_w, screen_h));
+        }
+
         if !dirty.is_empty() {
+            let frame_start = timer::rdtsc();
             graphics::with(|g| {
                 for region in &dirty {
                     let region = region.clamp_to(screen_w, screen_h);
@@ -218,6 +281,25 @@ pub extern "C" fn wm_task() -> ! {
                 prev_cursor = draw_cursor(g, cursor_x.max(0) as usize, cursor_y.max(0) as usize);
                 g.present();
             });
+            let frame_end = timer::rdtsc();
+
+            crate::metrics::record_frame_time(timer::cycles_to_us(frame_end - frame_start));
+            crate::metrics::FRAMES_PRESENTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            frames_in_window += 1;
+            if let Some(isr_tsc) = pending_input_tsc.take() {
+                // The frame containing this mouse motion is now on screen.
+                crate::metrics::record_input_latency(timer::cycles_to_us(
+                    frame_end.saturating_sub(isr_tsc),
+                ));
+            }
+        }
+
+        let window_ticks = now.saturating_sub(fps_window_start);
+        if window_ticks >= 100 {
+            // Normalize to exactly one second in case the window overshot.
+            crate::metrics::roll_fps_window(frames_in_window * 100 / window_ticks);
+            fps_window_start = now;
+            frames_in_window = 0;
         }
     }
 }
@@ -229,7 +311,13 @@ fn draw_cursor(g: &mut graphics::Graphics, cx: usize, cy: usize) -> Rect {
     let half = CURSOR_SIZE / 2;
     let x0 = cx.saturating_sub(half);
     let y0 = cy.saturating_sub(half);
-    g.fill_rect(Rect::new(x0, cy.saturating_sub(1), CURSOR_SIZE, 3), Color::WHITE);
-    g.fill_rect(Rect::new(cx.saturating_sub(1), y0, 3, CURSOR_SIZE), Color::WHITE);
+    g.fill_rect(
+        Rect::new(x0, cy.saturating_sub(1), CURSOR_SIZE, 3),
+        Color::WHITE,
+    );
+    g.fill_rect(
+        Rect::new(cx.saturating_sub(1), y0, 3, CURSOR_SIZE),
+        Color::WHITE,
+    );
     Rect::new(x0, y0, CURSOR_SIZE, CURSOR_SIZE)
 }

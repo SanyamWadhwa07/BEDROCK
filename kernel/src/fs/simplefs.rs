@@ -27,7 +27,6 @@ fn zero_block() -> Box<[u8; BLOCK_SIZE]> {
 }
 
 pub const BLOCK_SIZE: usize = 4096;
-const SECTORS_PER_BLOCK: u32 = (BLOCK_SIZE / ata::SECTOR_SIZE) as u32;
 
 const MAGIC: u32 = 0xBED2_0C5F;
 const SUPERBLOCK_BLOCK: u32 = 0;
@@ -39,7 +38,10 @@ const DATA_START_BLOCK: u32 = 4;
 /// `xtask/src/main.rs`'s `FS_IMAGE_BLOCKS`) -- there's no `IDENTIFY DEVICE`
 /// probe here, so the format-time disk size is a shared compile-time
 /// constant instead of something discovered at runtime.
-const DEFAULT_TOTAL_BLOCKS: u32 = 1024; // 4 MiB
+/// Blocks the filesystem itself owns. `xtask` sizes `fs.img` to this plus a
+/// scratch region for `bench ata`, which starts writing at exactly this
+/// block -- keep the two in step.
+pub const DEFAULT_TOTAL_BLOCKS: u32 = 1024; // 4 MiB
 
 const MAX_INODES: u32 = 64;
 const DIRECT_PTRS: usize = 10;
@@ -62,6 +64,17 @@ struct Superblock {
 static MOUNTED: Mutex<Option<Superblock>> = Mutex::new(None);
 static FS_LOCK: Mutex<()> = Mutex::new(());
 
+/// Exposes the filesystem/disk lock for callers that need raw ATA access
+/// (the `bench ata` command): the ATA driver has no lock of its own --
+/// everything normally serializes through this lock -- so raw port access
+/// from another task must hold it too.
+pub fn lock_disk() -> spin::MutexGuard<'static, ()> {
+    FS_LOCK.lock()
+}
+
+/// Re-export of the block-cache counters for the shell/bench reporting.
+pub use super::cache::{set_enabled as set_cache_enabled, stats as cache_stats};
+
 #[derive(Clone, Copy)]
 struct DiskInode {
     used: bool,
@@ -73,7 +86,13 @@ struct DiskInode {
 
 impl DiskInode {
     fn empty() -> Self {
-        Self { used: false, kind: 0, size: 0, direct: [0; DIRECT_PTRS], indirect: 0 }
+        Self {
+            used: false,
+            kind: 0,
+            size: 0,
+            direct: [0; DIRECT_PTRS],
+            indirect: 0,
+        }
     }
 
     fn read_from(buf: &[u8]) -> Self {
@@ -107,24 +126,14 @@ impl DiskInode {
     }
 }
 
+/// All block I/O goes through the LRU block cache (write-through, so
+/// on-disk state is always as durable as it was before the cache existed).
 fn read_block(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), &'static str> {
-    let mut sector = [0u8; ata::SECTOR_SIZE];
-    for i in 0..SECTORS_PER_BLOCK {
-        ata::read_sector(block * SECTORS_PER_BLOCK + i, &mut sector)?;
-        let off = i as usize * ata::SECTOR_SIZE;
-        buf[off..off + ata::SECTOR_SIZE].copy_from_slice(&sector);
-    }
-    Ok(())
+    super::cache::read_block(block, buf)
 }
 
 fn write_block(block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), &'static str> {
-    let mut sector = [0u8; ata::SECTOR_SIZE];
-    for i in 0..SECTORS_PER_BLOCK {
-        let off = i as usize * ata::SECTOR_SIZE;
-        sector.copy_from_slice(&buf[off..off + ata::SECTOR_SIZE]);
-        ata::write_sector(block * SECTORS_PER_BLOCK + i, &sector)?;
-    }
-    Ok(())
+    super::cache::write_block(block, buf)
 }
 
 fn bit_get(buf: &[u8], idx: u32) -> bool {
@@ -138,6 +147,13 @@ fn bit_set(buf: &mut [u8], idx: u32, val: bool) {
     } else {
         *byte &= !(1 << (idx % 8));
     }
+}
+
+fn free_inode(id: u32) -> Result<(), &'static str> {
+    let mut bmp = zero_block();
+    read_block(INODE_BITMAP_BLOCK, &mut bmp)?;
+    bit_set(&mut bmp[..], id, false);
+    write_block(INODE_BITMAP_BLOCK, &bmp)
 }
 
 fn alloc_inode() -> Result<u32, &'static str> {
@@ -260,7 +276,11 @@ fn dir_entry_at(block: &[u8; BLOCK_SIZE], slot: usize) -> (bool, String, u32) {
     let name_bytes = &block[off + 1..off + 1 + NAME_LEN];
     let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
     let name = String::from_utf8_lossy(&name_bytes[..name_len]).into_owned();
-    let inode = u32::from_le_bytes(block[off + 1 + NAME_LEN..off + 1 + NAME_LEN + 4].try_into().unwrap());
+    let inode = u32::from_le_bytes(
+        block[off + 1 + NAME_LEN..off + 1 + NAME_LEN + 4]
+            .try_into()
+            .unwrap(),
+    );
     (used, name, inode)
 }
 
@@ -371,24 +391,7 @@ pub fn write_file(inode_id: u32, data: &[u8]) -> Result<(), &'static str> {
     let sb = superblock();
     let mut inode = read_inode(inode_id)?;
 
-    for ptr in inode.direct.iter() {
-        if *ptr != 0 {
-            free_data_block(*ptr)?;
-        }
-    }
-    if inode.indirect != 0 {
-        let mut ptrs_block = zero_block();
-        read_block(inode.indirect, &mut ptrs_block)?;
-        for i in 0..PTRS_PER_BLOCK {
-            let ptr = u32::from_le_bytes(ptrs_block[i * 4..i * 4 + 4].try_into().unwrap());
-            if ptr != 0 {
-                free_data_block(ptr)?;
-            }
-        }
-        free_data_block(inode.indirect)?;
-    }
-    inode.direct = [0; DIRECT_PTRS];
-    inode.indirect = 0;
+    free_file_blocks(&mut inode)?;
 
     let blocks_needed = data.len().div_ceil(BLOCK_SIZE);
     if blocks_needed > DIRECT_PTRS + PTRS_PER_BLOCK {
@@ -425,4 +428,93 @@ pub fn write_file(inode_id: u32, data: &[u8]) -> Result<(), &'static str> {
     inode.size = data.len() as u32;
     write_inode(inode_id, &inode)?;
     Ok(())
+}
+
+/// Frees every data block an inode owns (direct, the indirect targets, and
+/// the indirect block itself) and zeroes its pointers -- shared between
+/// "overwrite" (`write_file`) and "delete" (`delete_file`). Caller must
+/// hold `FS_LOCK` and is responsible for writing the inode back (or
+/// freeing it entirely).
+fn free_file_blocks(inode: &mut DiskInode) -> Result<(), &'static str> {
+    for ptr in inode.direct.iter() {
+        if *ptr != 0 {
+            free_data_block(*ptr)?;
+        }
+    }
+    if inode.indirect != 0 {
+        let mut ptrs_block = zero_block();
+        read_block(inode.indirect, &mut ptrs_block)?;
+        for i in 0..PTRS_PER_BLOCK {
+            let ptr = u32::from_le_bytes(ptrs_block[i * 4..i * 4 + 4].try_into().unwrap());
+            if ptr != 0 {
+                free_data_block(ptr)?;
+            }
+        }
+        free_data_block(inode.indirect)?;
+    }
+    inode.direct = [0; DIRECT_PTRS];
+    inode.indirect = 0;
+    Ok(())
+}
+
+/// Deletes a file by name from the root directory: frees all of its data
+/// blocks, releases its inode, and clears the directory entry. Refuses to
+/// touch directories (only the root is one, and it isn't listed in itself,
+/// but belt and braces).
+pub fn delete_file(name: &str) -> Result<(), &'static str> {
+    let _guard = FS_LOCK.lock();
+    let root = read_inode(ROOT_INODE)?;
+    let mut dir_block = zero_block();
+    read_block(root.direct[0], &mut dir_block)?;
+
+    let mut found = None;
+    for slot in 0..(BLOCK_SIZE / DIR_ENTRY_SIZE) {
+        let (used, existing_name, inode) = dir_entry_at(&dir_block, slot);
+        if used && existing_name == name {
+            found = Some((slot, inode));
+            break;
+        }
+    }
+    let (slot, inode_id) = found.ok_or("no such file")?;
+
+    let mut inode = read_inode(inode_id)?;
+    if inode.kind == KIND_DIR {
+        return Err("refusing to delete a directory");
+    }
+    free_file_blocks(&mut inode)?;
+    write_inode(inode_id, &DiskInode::empty())?;
+    free_inode(inode_id)?;
+
+    write_dir_entry(&mut dir_block, slot, false, "", 0);
+    write_block(root.direct[0], &dir_block)
+}
+
+/// Renames a file in the root directory (same inode, new directory-entry
+/// name). Fails if the target name is already taken.
+pub fn rename_file(old: &str, new: &str) -> Result<(), &'static str> {
+    if new.is_empty() {
+        return Err("new name is empty");
+    }
+    if new.len() > NAME_LEN {
+        return Err("new name is too long");
+    }
+    let _guard = FS_LOCK.lock();
+    let root = read_inode(ROOT_INODE)?;
+    let mut dir_block = zero_block();
+    read_block(root.direct[0], &mut dir_block)?;
+
+    let mut found = None;
+    for slot in 0..(BLOCK_SIZE / DIR_ENTRY_SIZE) {
+        let (used, existing_name, inode) = dir_entry_at(&dir_block, slot);
+        if used && existing_name == new {
+            return Err("a file with the new name already exists");
+        }
+        if used && existing_name == old {
+            found = Some((slot, inode));
+        }
+    }
+    let (slot, inode_id) = found.ok_or("no such file")?;
+
+    write_dir_entry(&mut dir_block, slot, true, new, inode_id);
+    write_block(root.direct[0], &dir_block)
 }

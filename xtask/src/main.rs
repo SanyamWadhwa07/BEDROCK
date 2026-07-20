@@ -8,6 +8,15 @@ use std::process::Command;
 const FS_IMAGE_BLOCKS: u64 = 1024;
 const FS_BLOCK_SIZE: u64 = 4096;
 
+/// Extra blocks appended *past* the filesystem for `bench ata`'s raw-disk
+/// scratch region. Must match `kernel/src/bench.rs`'s `ATA_SCRATCH_BLOCKS`,
+/// which starts writing at block `FS_IMAGE_BLOCKS`. Without this the
+/// benchmark's very first write lands past the end of the image and the ATA
+/// driver reports an error instead of a throughput number.
+const BENCH_SCRATCH_BLOCKS: u64 = 64;
+
+const TOTAL_IMAGE_BLOCKS: u64 = FS_IMAGE_BLOCKS + BENCH_SCRATCH_BLOCKS;
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -22,11 +31,36 @@ fn workspace_root() -> PathBuf {
 /// `fs.img` by hand to force a fresh reformat.
 fn ensure_fs_image(root: &Path) -> PathBuf {
     let path = root.join("fs.img");
+    let wanted = TOTAL_IMAGE_BLOCKS * FS_BLOCK_SIZE;
+
     if !path.exists() {
         let file = std::fs::File::create(&path).expect("failed to create fs.img");
-        file.set_len(FS_IMAGE_BLOCKS * FS_BLOCK_SIZE)
-            .expect("failed to size fs.img");
+        file.set_len(wanted).expect("failed to size fs.img");
         println!("Created fresh SimpleFS disk image: {}", path.display());
+        return path;
+    }
+
+    // An image from before the benchmark scratch region existed is too
+    // short. Grow it in place rather than recreating: the extra blocks sit
+    // entirely past the filesystem, so existing files are untouched and
+    // Phase 7's across-reboot persistence still holds.
+    let len = std::fs::metadata(&path)
+        .expect("failed to stat fs.img")
+        .len();
+    if len < wanted {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("failed to open fs.img for resize")
+            .set_len(wanted)
+            .expect("failed to grow fs.img");
+        println!(
+            "Grew {} from {} to {} bytes to make room for the bench scratch region \
+             (filesystem contents preserved).",
+            path.display(),
+            len,
+            wanted
+        );
     }
     path
 }
@@ -38,7 +72,9 @@ fn build_kernel(root: &Path, release: bool) -> PathBuf {
     if release {
         cmd.arg("--release");
     }
-    let status = cmd.status().expect("failed to spawn cargo build for kernel");
+    let status = cmd
+        .status()
+        .expect("failed to spawn cargo build for kernel");
     if !status.success() {
         panic!("kernel build failed with status: {status}");
     }

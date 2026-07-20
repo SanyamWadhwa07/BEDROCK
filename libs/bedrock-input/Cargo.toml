@@ -1,0 +1,7 @@
+[package]
+name = "bedrock-input"
+version = "0.1.0"
+edition = "2021"
+description = "PS/2 mouse 3-byte packet reassembly FSM with sync recovery. no_std, port-I/O-free, host-testable."
+
+[dependencies]

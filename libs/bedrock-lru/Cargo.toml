@@ -1,0 +1,7 @@
+[package]
+name = "bedrock-lru"
+version = "0.1.0"
+edition = "2021"
+description = "Fixed-capacity LRU cache: open-addressing hash table + arena doubly-linked list, O(1) get/put/evict. no_std, host-testable."
+
+[dependencies]

@@ -1,4 +1,3 @@
-use crate::serial::SERIAL1;
 use crate::{serial_print, serial_println};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -28,14 +27,14 @@ pub fn run() -> ! {
     print_prompt();
 
     loop {
-        if !crate::serial::byte_ready() {
-            // Nothing to read -- don't touch SERIAL1's lock at all here, or
-            // in a preemptive kernel we'd hold it for the whole idle wait
-            // and starve every other task's serial_print!.
+        // Bytes arrive via the IRQ4 handler into a lock-free ring buffer.
+        // The shell never touches the UART's receive path itself: as one of
+        // several round-robin tasks it is descheduled far too often to poll
+        // a one-byte register without losing input.
+        let Some(byte) = crate::serial::SERIAL_QUEUE.pop() else {
             core::hint::spin_loop();
             continue;
-        }
-        let byte = SERIAL1.lock().receive();
+        };
         match byte {
             b'\r' | b'\n' => {
                 serial_println!();
@@ -77,17 +76,28 @@ fn dispatch(cmd: &str) {
         "" => {}
         "help" => {
             serial_println!(
-                "commands: help, echo <text>, meminfo, frameinfo, alloctest, tasks, uptime, fault <type>"
+                "commands: help, echo <text>, meminfo, frameinfo, alloctest, tasks, uptime"
             );
-            serial_println!("fault types: breakpoint, page, gpf, double");
+            serial_println!(
+                "          bench <ata|alloc|fs|ctxswitch|all>, metrics, fscache <on|off>"
+            );
+            serial_println!("          redraw <naive|dirty>, fault <breakpoint|page|gpf|double>");
         }
         "alloctest" => cmd_alloctest(),
-        "tasks" => serial_println!(
-            "{} tasks: {:?}",
-            crate::task::scheduler::task_count(),
-            crate::task::scheduler::task_ids()
-        ),
-        "uptime" => serial_println!("{} timer ticks since boot", crate::task::timer::ticks()),
+        "bench" => crate::bench::run(arg),
+        "metrics" => cmd_metrics(),
+        "fscache" => cmd_fscache(arg),
+        "redraw" => cmd_redraw(arg),
+        "tasks" => cmd_tasks(),
+        "uptime" => {
+            let ms = crate::task::timer::uptime_ms();
+            serial_println!(
+                "up {}.{:02}s ({} timer ticks)",
+                ms / 1000,
+                (ms % 1000) / 10,
+                crate::task::timer::ticks()
+            );
+        }
         "echo" => serial_println!("{}", arg),
         "meminfo" => match MEM_INFO.lock().as_ref() {
             Some(info) => serial_println!(
@@ -108,12 +118,87 @@ fn dispatch(cmd: &str) {
     }
 }
 
+fn cmd_tasks() {
+    let stats = crate::task::scheduler::task_stats();
+    let total_ticks: u64 = stats.iter().map(|t| t.ticks_run).sum::<u64>().max(1);
+    serial_println!("{} tasks (cpu% = ticks_run share since boot):", stats.len());
+    for t in &stats {
+        serial_println!(
+            "  task {}: {:?}, {} switches, {} ticks run (~{}%)",
+            t.id,
+            t.state,
+            t.switches,
+            t.ticks_run,
+            t.ticks_run * 100 / total_ticks
+        );
+    }
+}
+
+fn cmd_metrics() {
+    use core::sync::atomic::Ordering;
+    serial_println!(
+        "compositor: {} fps, frame time {} us (last) / {} us (1s max), {} frames total, mode: {}",
+        crate::metrics::FPS.load(Ordering::Relaxed),
+        crate::metrics::FRAME_TIME_US_LAST.load(Ordering::Relaxed),
+        crate::metrics::FRAME_TIME_US_MAX.load(Ordering::Relaxed),
+        crate::metrics::FRAMES_PRESENTED.load(Ordering::Relaxed),
+        if crate::metrics::FORCE_FULL_REDRAW.load(Ordering::Relaxed) {
+            "naive full redraw"
+        } else {
+            "dirty-rect"
+        }
+    );
+    serial_println!(
+        "input latency (mouse IRQ -> pixels presented): {} us last, {} us avg",
+        crate::metrics::INPUT_LATENCY_US_LAST.load(Ordering::Relaxed),
+        crate::metrics::INPUT_LATENCY_US_EMA.load(Ordering::Relaxed)
+    );
+    let c = crate::fs::simplefs::cache_stats();
+    serial_println!(
+        "block cache: {}, {} hits / {} misses, {}/{} blocks resident",
+        if c.enabled { "on" } else { "off" },
+        c.hits,
+        c.misses,
+        c.resident,
+        c.capacity
+    );
+}
+
+fn cmd_fscache(arg: &str) {
+    match arg {
+        "on" => {
+            crate::fs::simplefs::set_cache_enabled(true);
+            serial_println!("block cache enabled");
+        }
+        "off" => {
+            crate::fs::simplefs::set_cache_enabled(false);
+            serial_println!("block cache disabled (and emptied)");
+        }
+        _ => serial_println!("usage: fscache <on|off>"),
+    }
+}
+
+fn cmd_redraw(arg: &str) {
+    use core::sync::atomic::Ordering;
+    match arg {
+        "naive" => {
+            crate::metrics::FORCE_FULL_REDRAW.store(true, Ordering::Relaxed);
+            serial_println!("compositor: forcing full-screen redraw every frame");
+        }
+        "dirty" => {
+            crate::metrics::FORCE_FULL_REDRAW.store(false, Ordering::Relaxed);
+            serial_println!("compositor: dirty-rect mode restored");
+        }
+        _ => serial_println!("usage: redraw <naive|dirty>  (check results with 'metrics')"),
+    }
+}
+
 fn cmd_fault(arg: &str) {
     match arg {
         "breakpoint" => x86_64::instructions::interrupts::int3(),
         "double" => trigger_stack_overflow(),
         "page" => unsafe {
-            let ptr = 0xdead_beef_000 as *mut u8;
+            let ptr = 0x0dea_dbee_f000u64 as *mut u8;
             *ptr = 42;
         },
         "gpf" => trigger_gpf(),
@@ -136,7 +221,10 @@ fn cmd_alloctest() {
         boxes.remove(5);
         boxes.remove(10);
         boxes.truncate(3);
-        serial_println!("allocated 20 boxes, freed out of order, {} remain", boxes.len());
+        serial_println!(
+            "allocated 20 boxes, freed out of order, {} remain",
+            boxes.len()
+        );
     } // everything drops here
     serial_println!("heap stress complete (no crash means the free list held up)");
 

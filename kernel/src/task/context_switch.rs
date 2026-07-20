@@ -56,12 +56,9 @@ pub unsafe extern "C" fn switch_to(prev_rsp_out: *mut u64, next_rsp: u64) {
 #[unsafe(naked)]
 extern "C" fn task_trampoline() -> ! {
     core::arch::naked_asm!(
-        "sti",
-        "call r12",
+        "sti", "call r12",
         // `entry` is `-> !` and must never return, but if it somehow did:
-        "2:",
-        "hlt",
-        "jmp 2b",
+        "2:", "hlt", "jmp 2b",
     );
 }
 

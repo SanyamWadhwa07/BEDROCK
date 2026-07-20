@@ -1,6 +1,17 @@
-//! PS/2 mouse: the hand-rolled part of the input stack. Covers the classic
-//! 8042-controller auxiliary-device enable dance and a 3-byte packet
-//! finite state machine with sync-bit recovery.
+//! PS/2 mouse: the hand-rolled part of the input stack. This module owns the
+//! classic 8042-controller auxiliary-device enable dance -- unavoidably port
+//! I/O, so it can only run on real hardware.
+//!
+//! The 3-byte packet reassembly FSM it feeds is pure byte-stream logic and
+//! lives in the `bedrock-input` crate instead, where ordinary `cargo test`
+//! covers it on the host (including a regression test for the stray-0xFA-ACK
+//! desync bug documented in `init` below). Re-exported here so the WM keeps
+//! using `input::mouse::{PacketParser, MouseEvent}`.
+
+// `MouseEvent` is named through `PacketParser::feed`'s return type rather
+// than directly, but stays re-exported as part of this module's surface.
+#[allow(unused_imports)]
+pub use bedrock_input::{MouseEvent, PacketParser};
 
 use x86_64::instructions::port::Port;
 
@@ -116,60 +127,5 @@ pub fn init() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct MouseEvent {
-    pub dx: i16,
-    pub dy: i16, // already flipped to screen coordinates (positive = down)
-    pub buttons: u8,
-}
-
-/// 3-byte packet reassembly FSM. Byte 0 is flags (bit3 is always set --
-/// that's the sync check: if we're at state 0 and bit3 is clear, the stream
-/// is misaligned and the byte is dropped until we re-sync). dx/dy are 9-bit
-/// two's complement: 8 data bits plus a sign bit in the flags byte.
-pub struct PacketParser {
-    bytes: [u8; 3],
-    idx: usize,
-}
-
-impl PacketParser {
-    pub const fn new() -> Self {
-        Self { bytes: [0; 3], idx: 0 }
-    }
-
-    pub fn feed(&mut self, byte: u8) -> Option<MouseEvent> {
-        // Sync check on the first byte of a packet: bit3 must be set, and
-        // the overflow bits must NOT be (QEMU/real mice essentially never
-        // set them in normal streams). The second condition specifically
-        // rejects stray 0xFA ACK bytes, which pass the bit3 test and would
-        // otherwise silently shift the whole stream by one.
-        if self.idx == 0 && (byte & 0x08 == 0 || byte & 0xC0 != 0) {
-            return None; // out of sync -- drop until a plausible flags byte
-        }
-        self.bytes[self.idx] = byte;
-        self.idx += 1;
-        if self.idx < 3 {
-            return None;
-        }
-        self.idx = 0;
-
-        let flags = self.bytes[0];
-        // Overflow bits set means garbage deltas -- discard the packet.
-        if flags & 0b1100_0000 != 0 {
-            return Some(MouseEvent { dx: 0, dy: 0, buttons: flags & 0x7 });
-        }
-        let mut dx = self.bytes[1] as i16;
-        if flags & 0x10 != 0 {
-            dx -= 256;
-        }
-        let mut dy = self.bytes[2] as i16;
-        if flags & 0x20 != 0 {
-            dy -= 256;
-        }
-        Some(MouseEvent {
-            dx,
-            dy: -dy, // PS/2 positive-y is up; screen positive-y is down
-            buttons: flags & 0x7,
-        })
-    }
-}
+// `MouseEvent` and `PacketParser` are re-exported from `bedrock-input` at
+// the top of this module.

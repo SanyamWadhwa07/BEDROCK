@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "bedrock-gfx"
+version = "0.1.0"
+
+[[package]]
+name = "bedrock-input"
+version = "0.1.0"
+
+[[package]]
+name = "bedrock-lru"
+version = "0.1.0"
+
+[[package]]
+name = "bedrock-mm"
+version = "0.1.0"
+
+[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -36,6 +52,10 @@ checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "bedrock-gfx",
+ "bedrock-input",
+ "bedrock-lru",
+ "bedrock-mm",
  "bootloader_api",
  "linked_list_allocator",
  "noto-sans-mono-bitmap",

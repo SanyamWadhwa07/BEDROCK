@@ -29,7 +29,12 @@ pub enum WindowContent {
     /// Live scheduler counters + a bouncing box, bounced off this window's
     /// *own* content bounds (not the screen) -- proves per-window state
     /// survives drag/resize independently of every other window.
-    Stats { box_x: i32, box_y: i32, vx: i32, vy: i32 },
+    Stats {
+        box_x: i32,
+        box_y: i32,
+        vx: i32,
+        vy: i32,
+    },
     /// A real command line over SimpleFS: `help`, `ls`, `cat <name>`,
     /// `write <name> <text...>`. Only receives keystrokes while focused.
     Terminal { input: String, history: Vec<String> },
@@ -41,8 +46,16 @@ pub enum WindowContent {
 }
 
 pub enum EditorState {
-    Browsing { entries: Vec<(String, u32, u32)>, selected: usize },
-    Editing { name: String, inode: u32, buf: String, status: String },
+    Browsing {
+        entries: Vec<(String, u32, u32)>,
+        selected: usize,
+    },
+    Editing {
+        name: String,
+        inode: u32,
+        buf: String,
+        status: String,
+    },
 }
 
 impl WindowContent {
@@ -54,13 +67,17 @@ impl WindowContent {
     }
 
     pub fn new_editor() -> Self {
-        WindowContent::Editor(EditorState::Browsing { entries: simplefs::list_root(), selected: 0 })
+        WindowContent::Editor(EditorState::Browsing {
+            entries: simplefs::list_root(),
+            selected: 0,
+        })
     }
 }
 
-/// A tiny shell over SimpleFS: `ls`/`cat`/`write` are the classic trio
-/// needed to prove read + write + directory listing all work, without
-/// building a whole command grammar.
+/// A tiny shell over SimpleFS: `ls`/`cat`/`write` prove read + write +
+/// directory listing, and `rm`/`mv` exercise the inode/bitmap *reclamation*
+/// paths -- deleting has to free data blocks, the indirect block, and the
+/// inode itself, which is where a filesystem leaks if it is going to.
 fn run_terminal_command(cmd: &str) -> String {
     let cmd = cmd.trim();
     if cmd.is_empty() {
@@ -70,7 +87,45 @@ fn run_terminal_command(cmd: &str) -> String {
     let verb = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
     match verb {
-        "help" => String::from("commands: help, ls, cat <name>, write <name> <text>"),
+        "help" => String::from(
+            "commands: help, ls, cat <name>, write <name> <text>,\n          rm <name>, mv <old> <new>, df",
+        ),
+        "rm" => {
+            if rest.is_empty() {
+                return String::from("usage: rm <name>");
+            }
+            match simplefs::delete_file(rest) {
+                Ok(()) => format!("removed {}", rest),
+                Err(e) => format!("rm: {}", e),
+            }
+        }
+        "mv" => {
+            let mut mparts = rest.splitn(2, ' ');
+            let old = mparts.next().unwrap_or("").trim();
+            let new = mparts.next().unwrap_or("").trim();
+            if old.is_empty() || new.is_empty() {
+                return String::from("usage: mv <old> <new>");
+            }
+            match simplefs::rename_file(old, new) {
+                Ok(()) => format!("{} -> {}", old, new),
+                Err(e) => format!("mv: {}", e),
+            }
+        }
+        "df" => {
+            let entries = simplefs::list_root();
+            let used: u64 = entries.iter().map(|(_, _, size)| *size as u64).sum();
+            let c = simplefs::cache_stats();
+            format!(
+                "{} files, {} bytes used\ncache: {}, {}/{} blocks, {} hits / {} misses",
+                entries.len(),
+                used,
+                if c.enabled { "on" } else { "off" },
+                c.resident,
+                c.capacity,
+                c.hits,
+                c.misses
+            )
+        }
         "ls" => {
             let entries = simplefs::list_root();
             if entries.is_empty() {
@@ -138,15 +193,52 @@ fn handle_editor_key(state: &mut EditorState, key: DecodedKey) -> bool {
                     let buf = simplefs::read_file(inode)
                         .map(|b| String::from_utf8_lossy(&b).into_owned())
                         .unwrap_or_default();
-                    *state = EditorState::Editing { name, inode, buf, status: String::from("Loaded.") };
+                    *state = EditorState::Editing {
+                        name,
+                        inode,
+                        buf,
+                        status: String::from("Loaded."),
+                    };
                 }
                 true
             }
+            DecodedKey::Unicode('d') | DecodedKey::Unicode('D') => {
+                let Some((name, _, _)) = entries.get(*selected).cloned() else {
+                    return false;
+                };
+                if let Err(e) = simplefs::delete_file(&name) {
+                    crate::serial_println!("editor: delete_file({}) failed: {}", name, e);
+                }
+                // Re-list rather than removing locally, so the view always
+                // reflects what is actually on disk, and clamp the cursor:
+                // deleting the last entry would otherwise leave `selected`
+                // pointing one past the end.
+                *entries = simplefs::list_root();
+                *selected = (*selected).min(entries.len().saturating_sub(1));
+                true
+            }
             DecodedKey::Unicode('n') | DecodedKey::Unicode('N') => {
-                let name = format!("note{}.txt", entries.len());
+                // Pick a name that isn't taken -- entry count alone collides
+                // once anything has been deleted.
+                let mut n = entries.len();
+                let name = loop {
+                    let candidate = format!("note{}.txt", n);
+                    if !entries
+                        .iter()
+                        .any(|(existing, _, _)| *existing == candidate)
+                    {
+                        break candidate;
+                    }
+                    n += 1;
+                };
                 match simplefs::create_file(&name) {
                     Ok(inode) => {
-                        *state = EditorState::Editing { name, inode, buf: String::new(), status: String::from("New file.") };
+                        *state = EditorState::Editing {
+                            name,
+                            inode,
+                            buf: String::new(),
+                            status: String::from("New file."),
+                        };
                     }
                     Err(e) => crate::serial_println!("editor: create_file({}) failed: {}", name, e),
                 }
@@ -154,9 +246,14 @@ fn handle_editor_key(state: &mut EditorState, key: DecodedKey) -> bool {
             }
             _ => false,
         },
-        EditorState::Editing { inode, buf, status, .. } => match key {
+        EditorState::Editing {
+            inode, buf, status, ..
+        } => match key {
             DecodedKey::Unicode('\u{1b}') => {
-                *state = EditorState::Browsing { entries: simplefs::list_root(), selected: 0 };
+                *state = EditorState::Browsing {
+                    entries: simplefs::list_root(),
+                    selected: 0,
+                };
                 true
             }
             DecodedKey::RawKey(KeyCode::F2) => {
@@ -232,7 +329,13 @@ impl Window {
     /// primitive the dirty-rect tracker uses.
     pub fn step_animation(&mut self) -> Option<Rect> {
         let cr = self.content_rect();
-        let WindowContent::Stats { box_x, box_y, vx, vy } = &mut self.content else {
+        let WindowContent::Stats {
+            box_x,
+            box_y,
+            vx,
+            vy,
+        } = &mut self.content
+        else {
             return None;
         };
         let max_x = (cr.w as i32 - BOX_SIZE - 2).max(1);
@@ -310,8 +413,16 @@ impl Window {
     }
 
     pub fn draw(&self, g: &mut graphics::Graphics, focused: bool) {
-        let border = if focused { Color::CYAN } else { Color::rgb(80, 84, 100) };
-        let titlebar_bg = if focused { Color::rgb(40, 70, 90) } else { Color::rgb(35, 37, 46) };
+        let border = if focused {
+            Color::CYAN
+        } else {
+            Color::rgb(80, 84, 100)
+        };
+        let titlebar_bg = if focused {
+            Color::rgb(40, 70, 90)
+        } else {
+            Color::rgb(35, 37, 46)
+        };
 
         // Border, then an inset fill, gives a 1px frame without a dedicated
         // stroke primitive.
@@ -325,7 +436,13 @@ impl Window {
         g.fill_rect(inner, Color::BG);
 
         g.fill_rect(self.titlebar_rect(), titlebar_bg);
-        g.draw_string(self.rect.x + 6, self.rect.y + 3, &self.title, Color::WHITE, titlebar_bg);
+        g.draw_string(
+            self.rect.x + 6,
+            self.rect.y + 3,
+            &self.title,
+            Color::WHITE,
+            titlebar_bg,
+        );
 
         let cb = self.close_button_rect();
         g.fill_rect(cb, Color::rgb(180, 60, 60));
@@ -342,16 +459,52 @@ impl Window {
         match &self.content {
             WindowContent::Stats { box_x, box_y, .. } => {
                 let counters = demo_tasks::snapshot();
-                let l1 = format!("{}={} {}={}", counters[0].0, counters[0].1, counters[1].0, counters[1].1);
+                let l1 = format!(
+                    "{}={} {}={}",
+                    counters[0].0, counters[0].1, counters[1].0, counters[1].1
+                );
                 let l2 = format!(
                     "{}={} {}={} {}={}",
-                    counters[2].0, counters[2].1, counters[3].0, counters[3].1, counters[4].0, counters[4].1
+                    counters[2].0,
+                    counters[2].1,
+                    counters[3].0,
+                    counters[3].1,
+                    counters[4].0,
+                    counters[4].1
                 );
                 g.draw_string(cr.x + 4, cr.y + 4, &l1, Color::GREEN, Color::BG);
-                g.draw_string(cr.x + 4, cr.y + 4 + LINE_HEIGHT, &l2, Color::GREEN, Color::BG);
+                g.draw_string(
+                    cr.x + 4,
+                    cr.y + 4 + LINE_HEIGHT,
+                    &l2,
+                    Color::GREEN,
+                    Color::BG,
+                );
+
+                // Live compositor metrics, so the numbers the serial
+                // `metrics` command reports are also visible on screen while
+                // dragging windows around -- which is exactly when frame
+                // time is worth watching.
+                use core::sync::atomic::Ordering;
+                let l3 = format!(
+                    "{} fps  frame {}us  peak {}us",
+                    crate::metrics::FPS.load(Ordering::Relaxed),
+                    crate::metrics::FRAME_TIME_US_LAST.load(Ordering::Relaxed),
+                    crate::metrics::FRAME_TIME_US_MAX.load(Ordering::Relaxed),
+                );
+                g.draw_string(
+                    cr.x + 4,
+                    cr.y + 4 + 2 * LINE_HEIGHT,
+                    &l3,
+                    Color::CYAN,
+                    Color::BG,
+                );
                 let bx = (cr.x as i32 + *box_x).max(0) as usize;
                 let by = (cr.y as i32 + *box_y).max(0) as usize;
-                g.fill_rect(Rect::new(bx, by, BOX_SIZE as usize, BOX_SIZE as usize), Color::ORANGE);
+                g.fill_rect(
+                    Rect::new(bx, by, BOX_SIZE as usize, BOX_SIZE as usize),
+                    Color::ORANGE,
+                );
             }
             WindowContent::Terminal { input, history } => {
                 let max_lines = cr.h.saturating_sub(4) / LINE_HEIGHT;
@@ -365,30 +518,52 @@ impl Window {
                     g.draw_string(cr.x + 4, y, line, Color::GREEN, Color::BG);
                     y += LINE_HEIGHT;
                 }
-                let prompt_color = if focused { Color::WHITE } else { Color::rgb(120, 122, 130) };
+                let prompt_color = if focused {
+                    Color::WHITE
+                } else {
+                    Color::rgb(120, 122, 130)
+                };
                 let prompt = format!("{}{}", if focused { "> " } else { "  " }, input);
                 if y + LINE_HEIGHT <= cr.bottom() {
                     g.draw_string(cr.x + 4, y, &prompt, prompt_color, Color::BG);
                 }
             }
             WindowContent::Editor(EditorState::Browsing { entries, selected }) => {
-                g.draw_string(cr.x + 4, cr.y + 4, "Enter=open  N=new  arrows=move", Color::CYAN, Color::BG);
+                g.draw_string(
+                    cr.x + 4,
+                    cr.y + 4,
+                    "Enter=open N=new D=del arrows=move",
+                    Color::CYAN,
+                    Color::BG,
+                );
                 let mut y = cr.y + 4 + LINE_HEIGHT;
                 if entries.is_empty() {
-                    g.draw_string(cr.x + 4, y, "(no files yet -- press N)", Color::WHITE, Color::BG);
+                    g.draw_string(
+                        cr.x + 4,
+                        y,
+                        "(no files yet -- press N)",
+                        Color::WHITE,
+                        Color::BG,
+                    );
                 }
                 for (i, (name, _, size)) in entries.iter().enumerate() {
                     if y + LINE_HEIGHT > cr.bottom() {
                         break;
                     }
                     let marker = if i == *selected { ">" } else { " " };
-                    let color = if i == *selected { Color::ORANGE } else { Color::WHITE };
+                    let color = if i == *selected {
+                        Color::ORANGE
+                    } else {
+                        Color::WHITE
+                    };
                     let line = format!("{} {} ({}B)", marker, name, size);
                     g.draw_string(cr.x + 4, y, &line, color, Color::BG);
                     y += LINE_HEIGHT;
                 }
             }
-            WindowContent::Editor(EditorState::Editing { name, buf, status, .. }) => {
+            WindowContent::Editor(EditorState::Editing {
+                name, buf, status, ..
+            }) => {
                 let header = format!("Editing {}  (F2=save  Esc=back)  {}", name, status);
                 g.draw_string(cr.x + 4, cr.y + 4, &header, Color::CYAN, Color::BG);
                 let mut y = cr.y + 4 + LINE_HEIGHT;

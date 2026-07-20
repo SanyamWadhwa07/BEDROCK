@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+mod bench;
 mod demo_tasks;
 mod fs;
 mod gdt;
@@ -11,6 +12,7 @@ mod graphics;
 mod input;
 mod interrupts;
 mod memory;
+mod metrics;
 mod serial;
 mod shell;
 mod task;
@@ -51,7 +53,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .into_option()
         .expect("bootloader did not map physical memory");
     let mut mapper = unsafe { memory::paging::init(VirtAddr::new(phys_mem_offset)) };
-    let mut bump_allocator = memory::frame_allocator::BumpFrameAllocator::init(&boot_info.memory_regions);
+    let mut bump_allocator =
+        memory::frame_allocator::BumpFrameAllocator::init(&boot_info.memory_regions);
     memory::heap::init_heap(&mut mapper, &mut bump_allocator).expect("heap initialization failed");
     serial_println!(
         "Heap initialized: {} bytes at {:#x}.",
@@ -96,10 +99,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
 
     input::init_devices(); // must precede sti: consumes ACK bytes by polling
+    serial::enable_receive_interrupt();
     task::timer::init_pit();
     interrupts::unmask_irqs();
     x86_64::instructions::interrupts::enable();
-    serial_println!("Timer armed, IRQs unmasked (0/1/2/12), interrupts enabled.");
+    serial_println!("Timer armed, IRQs unmasked (0/1/2/4/12), interrupts enabled.");
+
+    // Needs the PIT firing, so this is the earliest it can run (~0.6s).
+    task::timer::calibrate_tsc();
 
     serial_println!("Bedrock: entering serial shell. Try 'help'.");
     shell::run();
