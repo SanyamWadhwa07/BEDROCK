@@ -80,9 +80,11 @@ Every core component is built on a *named*, classic data structure or algorithm 
 | Window manager | **Z-order list** + top-down **hit-testing** (point-in-rect search) | `kernel/src/wm/zorder.rs` |
 | SimpleFS | **Inode tree indexing** (direct + single-indirect blocks = shallow B-tree-like fanout), **two bitmaps** for free-space tracking, directory as an association list | `libs/bedrock-fs/` (layout, host-tested), `kernel/src/fs/simplefs.rs` (ATA-backed device + mount) |
 
-The five crates under `libs/` are `no_std` but also build for the host, so `cargo test` covers them without QEMU. Only code that genuinely needs the target stayed in the kernel binary: interrupt handlers, inline assembly, port I/O, and MMIO.
+The six crates under `libs/` are `no_std` but also build for the host, so `cargo test` covers them without QEMU. Only code that genuinely needs the target stayed in the kernel binary: interrupt handlers, inline assembly, port I/O, and MMIO.
 
-**Still not implemented** (named as explicit future work, not silently skipped): an MLFQ (multilevel feedback queue) scheduler upgrade, a write-back mode for the block cache (which needs a crash-consistency story SimpleFS does not have), subdirectories, and UEFI boot.
+**Implemented but deliberately not wired in:** the MLFQ scheduling policy in `libs/bedrock-sched`. It works and is tested, including a starvation test with a control. The kernel still schedules round-robin because MLFQ needs to know when a task blocks, and this kernel has no blocking primitive at all, so waiting tasks poll. Feeding the policy a "yield" signal that really means "still runnable" produced 174,729 context switches in 30 seconds from the shell alone. The prerequisite is a blocked task state and a wakeup path, not more scheduler work.
+
+**Still not implemented** (named as explicit future work, not silently skipped): a blocking/sleep primitive, a write-back mode for the block cache (which needs a crash-consistency story SimpleFS does not have), subdirectories, and UEFI boot.
 
 ## Interview-defense checklist
 

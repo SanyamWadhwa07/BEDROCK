@@ -4,6 +4,23 @@ A `no_std` Rust operating system kernel, booted from bare metal with no Linux (o
 
 Built as a systems-engineering portfolio project: the goal is to be a genuine kernel + GUI desktop in the lineage of [Redox OS](https://www.redox-os.org/) or the ["Writing an OS in Rust"](https://os.phil-opp.com/) (blog_os) series taken further, not a Linux-hosted simulation and not a "custom Linux distro" (real Linux kernel + custom desktop environment).
 
+## Measured results
+
+Every number below comes from `bench` and `metrics` commands built into the kernel itself, so anyone who boots it can reproduce them. Raw serial captures are in [`docs/benchmarks/`](docs/benchmarks/). Sandbox is QEMU 11.0 with no hardware acceleration (pure TCG software emulation), so absolute figures are pessimistic and the comparisons are the meaningful part.
+
+| | Result | How |
+|---|---|---|
+| **Context-switch latency** | **~251-269 cycles** per one-way switch | 200,000 switches against a dedicated fiber, bypassing the scheduler so 50ms time slices can't dominate |
+| **LRU block cache, read** | **305,428 us -> 125 us** (~2,400x) | Same 64 KiB workload with `fscache` on vs off, one boot |
+| **Dirty-rect vs full redraw** | **679 ms -> 14.3 ms** per frame (~47x) | `redraw naive` forces the strawman at runtime; captured back-to-back |
+| **Allocator throughput** | **~1.34M** alloc/free ops/sec | 200 rounds of heap churn plus frame alloc/free |
+| **Raw ATA PIO** | **87 KiB/s** write, **378 KiB/s** read | 256 KiB sequential, TSC cross-checked against PIT ticks |
+| **Scheduler fairness** | 7 tasks, **14% CPU each**, identical switch counts | Round-robin under a deliberately hostile busy-loop task |
+| **Filesystem persistence** | Survives across independent boots | Three separate QEMU processes: write, read back byte-for-byte, rename, delete |
+| **Host test coverage** | **67 tests** across 6 `no_std` crates | `cargo test`, no QEMU needed, run in CI |
+
+Two caveats stated up front rather than buried: absolute frame time varies by more than an order of magnitude between boots in this sandbox, so only the back-to-back A/B is meaningful; and input latency is instrumented but reads zero here, because a headless QEMU generates no mouse packets.
+
 ## What this is / is not
 
 **Is:**
@@ -69,7 +86,13 @@ The benchmarks are wired into the shipped kernel rather than living in a tempora
 - **ATA PIO, not AHCI/DMA.** Simple, correct, and slow by design -- see the benchmarks below. A real driver moving real workloads would want DMA.
 - **SimpleFS is not crash-safe/journaled**, and its root directory is flat (a single fixed data block, no subdirectories) -- a deliberate scope cut to keep Phase 7 focused on proving read+write+persistence end-to-end. The inode format (direct + single-indirect block pointers) supports a general directory tree if that's ever extended.
 - **Write-through block cache, no write-back.** Reads are served from an LRU block cache; writes always reach the disk before returning. That keeps durability identical to having no cache at all, and it also means writes get no speedup whatsoever from the cache. A write-back cache with an explicit flush would be the next step, and it needs a crash-consistency story SimpleFS does not currently have.
-- **No MLFQ / priority scheduling.** The scheduler is plain round-robin; a multilevel feedback queue was scoped as a stretch goal and not attempted.
+- **The kernel schedules round-robin, not MLFQ.** A full multilevel feedback queue (priority levels with per-level quanta, demotion on slice exhaustion, periodic priority boost) is implemented and tested in `libs/bedrock-sched`, and it was wired into the kernel and booted. It is not shipped wired in, for a reason worth stating precisely.
+
+  MLFQ infers priority from whether a task gives the CPU up early. This kernel has no blocking primitive: no sleep, no wait queues, no blocked task state. Tasks that are waiting poll in a loop. So "yield when idle" is the only signal available, and a task that yields is immediately runnable again, which means the shell yield-spun its way to 174,729 context switches in 30 seconds. It did get what MLFQ promises (top priority at 2% CPU, against 14% and 75 switches under round-robin), but through busy-yielding rather than actually sleeping.
+
+  The honest fix is a blocked state and a wakeup path, at which point MLFQ has real information to work with. Wiring the policy in first would be putting the feedback loop on top of a signal that does not mean what it should.
+
+  Worth recording because I initially got this wrong: I first blamed MLFQ for a 20x frame-time regression, then measured the reverted round-robin build and found the same numbers. The frame time was sandbox variance, not the scheduler. The reason not to ship MLFQ is the busy-yielding, and nothing else.
 - **No FAT32 interop.** Read-only FAT32 support was scoped as an optional stretch and not attempted -- SimpleFS is the only filesystem this kernel understands.
 
 None of the above are oversights discovered late -- they're the scope cuts named up front in [DESIGN.md](DESIGN.md), traded deliberately for finishing a complete, working GUI stack end to end.
@@ -107,6 +130,8 @@ Design decision #5 was the bet that dirty-rect bookkeeping pays for itself. `red
 
 The absolute FPS is low in both modes for the same reason everything else here is slow: no hardware acceleration, and the compositor is one of seven round-robin tasks sharing a single emulated core.
 
+**Read the ratio, not the absolute frame time.** Both rows above come from one boot, minutes apart, which is the only reason they can be compared. Across *different* boots the same unmodified code has measured anywhere from 14ms to 329ms per frame in this sandbox, with no stray QEMU processes and the host under 15% load. TCG throughput depends on host scheduling in ways nothing inside the kernel controls. Any single frame-time number here is worth very little on its own; an A/B captured back-to-back in one boot is worth something.
+
 ### Everything else
 
 | Phase | Metric | Result | Method |
@@ -133,6 +158,7 @@ Everything else on the earlier "not yet measured" list is now in the tables abov
   - `bedrock-gfx`: rectangle algebra and the dirty-rect union. Includes a randomized test that whatever the tracker returns always covers every pixel that was marked dirty, since under-coverage would leave stale pixels on screen.
   - `bedrock-input`: the PS/2 mouse packet FSM, including a regression test for the stray 0xFA ACK byte that desynchronized the stream during Phase 5.
   - `bedrock-lru`: the filesystem block cache, checked against a naive reference model over 100,000 randomized operations.
+  - `bedrock-sched`: the MLFQ scheduling policy. Asserts demotion, per-level quanta, and that a priority boost rescues a starved CPU-bound task, with a control test confirming the same task genuinely starves without boosting. Not currently wired into the kernel; see the scheduling note under known limitations.
   - `bedrock-fs`: the SimpleFS layout itself, generic over a `BlockDevice` so the tests can hand it an in-memory disk. Covers inode indexing through the single-indirect block, both free-space bitmaps, and the free-and-reallocate paths, asserting on block and inode accounting so a leak fails the test. Includes a remount check, which is the same property Phase 7 demonstrated by launching a second QEMU process, now runnable in milliseconds on the host.
 
   What deliberately stayed in the kernel binary is the part that cannot run on a host: interrupt handlers, inline assembly, port I/O, and MMIO. The 8042 controller dance stays in `kernel/src/input/mouse.rs` and only the byte-stream decoding moved out; likewise `kernel/src/fs/simplefs.rs` is now just the ATA-backed block device, the global mount, and the lock that serializes tasks.

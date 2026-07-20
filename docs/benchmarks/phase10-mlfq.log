@@ -1,0 +1,32 @@
+Bedrock: entering serial shell. Try 'help'.
+
+bedrock> tasks
+7 tasks (cpu% = ticks_run share since boot):
+  task 0: Running, L0, 399 switches, 35 ticks run (~1%)
+  task 1: Ready, L2, 96 switches, 438 ticks run (~17%)
+  task 2: Ready, L2, 110 switches, 410 ticks run (~16%)
+  task 3: Ready, L1, 95 switches, 434 ticks run (~17%)
+  task 4: Ready, L1, 110 switches, 404 ticks run (~15%)
+  task 5: Ready, L2, 95 switches, 430 ticks run (~16%)
+  task 6: Ready, L2, 110 switches, 400 ticks run (~15%)
+mlfq: queued per level [0, 2, 4], 488 demotions, 47 priority boosts
+bedrock> uptime
+up 29.83s (2983 timer ticks)
+bedrock> tasks
+7 tasks (cpu% = ticks_run share since boot):
+  task 0: Running, L0, 540 switches, 35 ticks run (~1%)
+  task 1: Ready, L2, 127 switches, 586 ticks run (~17%)
+  task 2: Ready, L1, 146 switches, 542 ticks run (~15%)
+  task 3: Ready, L1, 127 switches, 580 ticks run (~17%)
+  task 4: Ready, L1, 147 switches, 540 ticks run (~15%)
+  task 5: Ready, L1, 127 switches, 580 ticks run (~17%)
+  task 6: Ready, L1, 147 switches, 540 ticks run (~15%)
+mlfq: queued per level [0, 5, 1], 645 demotions, 63 priority boosts
+bedrock> bench ctxswitch
+bench ctxswitch: 100000 ping-pong round trips (interrupts off)...
+  200000 one-way switches: ~251 cycles (~78 ns) per switch
+bedrock> metrics
+compositor: 4 fps, frame time 185529 us (last) / 347463 us (1s max), 282 frames total, mode: dirty-rect
+input latency (mouse IRQ -> pixels presented): 0 us last, 0 us avg
+block cache: on, 0 hits / 3 misses, 3/64 blocks resident
+bedrock> 

@@ -1,0 +1,7 @@
+[package]
+name = "bedrock-sched"
+version = "0.1.0"
+edition = "2021"
+description = "Multilevel feedback queue scheduling policy: priority levels with per-level quanta, demotion on slice exhaustion, periodic priority boost. no_std, context-switch-free, host-testable."
+
+[dependencies]
