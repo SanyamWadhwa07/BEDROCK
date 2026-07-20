@@ -82,7 +82,15 @@ fn dispatch(cmd: &str) {
                 "          bench <ata|alloc|fs|ctxswitch|all>, metrics, fscache <on|off>"
             );
             serial_println!("          redraw <naive|dirty>, fault <breakpoint|page|gpf|double>");
+            serial_println!(
+                "          ls, cat <name>, write <name> <text>, rm <name>, mv <old> <new>"
+            );
         }
+        "ls" => cmd_ls(),
+        "cat" => cmd_cat(arg),
+        "write" => cmd_write(arg),
+        "rm" => cmd_rm(arg),
+        "mv" => cmd_mv(arg),
         "alloctest" => cmd_alloctest(),
         "bench" => crate::bench::run(arg),
         "metrics" => cmd_metrics(),
@@ -115,6 +123,97 @@ fn dispatch(cmd: &str) {
         ),
         "fault" => cmd_fault(arg),
         other => serial_println!("unknown command: {} (try 'help')", other),
+    }
+}
+
+// --- filesystem commands ---------------------------------------------------
+//
+// The GUI Terminal has had these since Phase 7, but the serial shell had no
+// way to touch the filesystem at all. That mattered more than it looked:
+// verifying persistence across a reboot means writing a file on one boot and
+// reading it back on the next, and on a headless machine the serial console
+// is the only way in.
+
+fn find_inode(name: &str) -> Option<u32> {
+    crate::fs::simplefs::list_root()
+        .into_iter()
+        .find(|(n, _, _)| n == name)
+        .map(|(_, inode, _)| inode)
+}
+
+fn cmd_ls() {
+    let entries = crate::fs::simplefs::list_root();
+    if entries.is_empty() {
+        serial_println!("(empty)");
+        return;
+    }
+    for (name, inode, size) in entries {
+        serial_println!("  {:<28} inode {:<3} {} bytes", name, inode, size);
+    }
+}
+
+fn cmd_cat(arg: &str) {
+    if arg.is_empty() {
+        serial_println!("usage: cat <name>");
+        return;
+    }
+    match find_inode(arg) {
+        Some(inode) => match crate::fs::simplefs::read_file(inode) {
+            Ok(bytes) => serial_println!("{}", alloc::string::String::from_utf8_lossy(&bytes)),
+            Err(e) => serial_println!("cat: {}", e),
+        },
+        None => serial_println!("cat: no such file: {}", arg),
+    }
+}
+
+fn cmd_write(arg: &str) {
+    let mut parts = arg.splitn(2, ' ');
+    let name = parts.next().unwrap_or("").trim();
+    let text = parts.next().unwrap_or("");
+    if name.is_empty() {
+        serial_println!("usage: write <name> <text>");
+        return;
+    }
+    let inode = match find_inode(name) {
+        Some(inode) => Some(inode),
+        None => match crate::fs::simplefs::create_file(name) {
+            Ok(inode) => Some(inode),
+            Err(e) => {
+                serial_println!("write: {}", e);
+                None
+            }
+        },
+    };
+    if let Some(inode) = inode {
+        match crate::fs::simplefs::write_file(inode, text.as_bytes()) {
+            Ok(()) => serial_println!("wrote {} bytes to {}", text.len(), name),
+            Err(e) => serial_println!("write: {}", e),
+        }
+    }
+}
+
+fn cmd_rm(arg: &str) {
+    if arg.is_empty() {
+        serial_println!("usage: rm <name>");
+        return;
+    }
+    match crate::fs::simplefs::delete_file(arg) {
+        Ok(()) => serial_println!("removed {}", arg),
+        Err(e) => serial_println!("rm: {}", e),
+    }
+}
+
+fn cmd_mv(arg: &str) {
+    let mut parts = arg.splitn(2, ' ');
+    let old = parts.next().unwrap_or("").trim();
+    let new = parts.next().unwrap_or("").trim();
+    if old.is_empty() || new.is_empty() {
+        serial_println!("usage: mv <old> <new>");
+        return;
+    }
+    match crate::fs::simplefs::rename_file(old, new) {
+        Ok(()) => serial_println!("{} -> {}", old, new),
+        Err(e) => serial_println!("mv: {}", e),
     }
 }
 

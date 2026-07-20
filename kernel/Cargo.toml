@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bedrock-fs = { path = "../libs/bedrock-fs" }
 bedrock-gfx = { path = "../libs/bedrock-gfx" }
 bedrock-input = { path = "../libs/bedrock-input" }
 bedrock-lru = { path = "../libs/bedrock-lru" }

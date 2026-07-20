@@ -78,11 +78,11 @@ Every core component is built on a *named*, classic data structure or algorithm 
 | PS/2 mouse protocol | **Finite state machine** with sync-bit recovery (3-byte packet reassembly, two's-complement deltas) | `libs/bedrock-input/` (logic, host-tested), `kernel/src/input/mouse.rs` (8042 port I/O) |
 | Filesystem block cache | **LRU cache**: open-addressing hash table (linear probing, backward-shift deletion) plus an arena-backed doubly-linked list, O(1) get/put/evict | `libs/bedrock-lru/` (logic, host-tested), `kernel/src/fs/cache.rs` (write-through policy) |
 | Window manager | **Z-order list** + top-down **hit-testing** (point-in-rect search) | `kernel/src/wm/zorder.rs` |
-| SimpleFS | **Inode tree indexing** (direct + single-indirect blocks = shallow B-tree-like fanout), **two bitmaps** for free-space tracking, directory as an association list | `kernel/src/fs/simplefs.rs` |
+| SimpleFS | **Inode tree indexing** (direct + single-indirect blocks = shallow B-tree-like fanout), **two bitmaps** for free-space tracking, directory as an association list | `libs/bedrock-fs/` (layout, host-tested), `kernel/src/fs/simplefs.rs` (ATA-backed device + mount) |
 
-The four crates under `libs/` are `no_std` but also build for the host, so `cargo test` covers them without QEMU. Only code that genuinely needs the target stayed in the kernel binary: interrupt handlers, inline assembly, port I/O, and MMIO.
+The five crates under `libs/` are `no_std` but also build for the host, so `cargo test` covers them without QEMU. Only code that genuinely needs the target stayed in the kernel binary: interrupt handlers, inline assembly, port I/O, and MMIO.
 
-**Still not implemented** (named as explicit future work, not silently skipped): an MLFQ (multilevel feedback queue) scheduler upgrade, a write-back mode for the block cache (which needs a crash-consistency story SimpleFS does not have), and splitting SimpleFS's inode and directory logic into a host-testable crate the way the other four were.
+**Still not implemented** (named as explicit future work, not silently skipped): an MLFQ (multilevel feedback queue) scheduler upgrade, a write-back mode for the block cache (which needs a crash-consistency story SimpleFS does not have), subdirectories, and UEFI boot.
 
 ## Interview-defense checklist
 

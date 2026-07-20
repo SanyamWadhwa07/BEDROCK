@@ -1,0 +1,7 @@
+[package]
+name = "bedrock-fs"
+version = "0.1.0"
+edition = "2021"
+description = "SimpleFS on-disk layout: superblock, two free-space bitmaps, inode table with direct + single-indirect indexing, flat directory. Generic over a BlockDevice, so it is host-testable against a fake disk."
+
+[dependencies]

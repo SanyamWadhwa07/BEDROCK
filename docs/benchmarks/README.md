@@ -3,6 +3,7 @@
 Raw serial logs behind the numbers in the top-level [README](../../README.md), kept so the figures can be checked against the actual capture rather than taken on trust.
 
 - `phase9-session.log`: one continuous boot covering the context-switch, allocator, filesystem, and raw ATA benchmarks, the block cache measured with `fscache` both on and off, and the compositor measured with `redraw` in both naive and dirty-rect modes. Also shows the boot sequence and the scheduler fairness snapshot from `tasks`.
+- `phase9-persistence.log`: three independent QEMU processes against one `fs.img`. The first writes a file, the second reads it back byte-for-byte and renames it, the third sees the rename and deletes it. Captured after the filesystem layout was extracted into `libs/bedrock-fs`, to confirm the on-disk format is unchanged.
 
 ## Reproducing
 

@@ -1,0 +1,36 @@
+=== BOOT 1 (write) ===
+Bedrock: entering serial shell. Try 'help'.
+
+bedrock> rm persist.txt
+removed persist.txt
+bedrock> write persist.txt hello-from-boot-one
+wrote 19 bytes to persist.txt
+bedrock> ls
+  persist.txt                  inode 1   19 bytes
+bedrock> cat persist.txt
+hello-from-boot-one
+bedrock> 
+=== BOOT 2 (separate QEMU process: read back + rename) ===
+Bedrock: entering serial shell. Try 'help'.
+
+bedrock> ls
+  persist.txt                  inode 1   19 bytes
+bedrock> cat persist.txt
+hello-from-boot-one
+bedrock> mv persist.txt renamed.txt
+persist.txt -> renamed.txt
+bedrock> ls
+  renamed.txt                  inode 1   19 bytes
+bedrock> 
+=== BOOT 3 (separate QEMU process: rename survived, then delete) ===
+Bedrock: entering serial shell. Try 'help'.
+
+bedrock> ls
+  renamed.txt                  inode 1   19 bytes
+bedrock> cat renamed.txt
+hello-from-boot-one
+bedrock> rm renamed.txt
+removed renamed.txt
+bedrock> ls
+(empty)
+bedrock> 
