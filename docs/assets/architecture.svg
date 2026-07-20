@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 762" width="1100" height="762" role="img" aria-label="Bedrock kernel architecture: layer stack and host-testable crates">
+  <defs>
+    <linearGradient id="abg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1016"/>
+      <stop offset="1" stop-color="#111a23"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#6BA8C9"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#F2A25C"/>
+    </marker>
+    <style>
+      .lbl   { font-family: Segoe UI, Helvetica, Arial, sans-serif; fill:#e9f0f5; }
+      .sub   { font-family: Segoe UI, Helvetica, Arial, sans-serif; fill:#93a7b4; }
+      .h     { font-family: Segoe UI, Helvetica, Arial, sans-serif; fill:#F2A25C; font-weight:700; }
+      .h2    { font-family: Segoe UI, Helvetica, Arial, sans-serif; fill:#6BA8C9; font-weight:700; }
+      .node  { fill:#0e1822; stroke:#6BA8C9; stroke-opacity:.45; stroke-width:1.6; }
+      .amber { stroke:#F2A25C; stroke-opacity:.6; }
+      .edge  { stroke:#6BA8C9; stroke-width:2; fill:none; marker-end:url(#arrow); }
+      .tie   { stroke:#F2A25C; stroke-width:1.5; fill:none; stroke-opacity:.55; stroke-dasharray:5 4; }
+    </style>
+  </defs>
+
+  <rect width="1100" height="762" rx="20" fill="url(#abg)"/>
+  <text x="40" y="46" class="h" font-size="22">Bedrock &#8212; kernel layer stack</text>
+  <text x="40" y="68" class="sub" font-size="12.5">every layer written from scratch &#183; single address space, ring 0 only &#183; each box is a real module, not a plan</text>
+
+  <!-- ================= kernel stack (bottom = bare metal) ================= -->
+
+  <!-- Apps -->
+  <rect class="node amber" x="40" y="88" width="620" height="60" rx="12"/>
+  <text x="60" y="114" class="lbl" font-size="16" font-weight="600">Native apps</text>
+  <text x="60" y="134" class="sub" font-size="12">Terminal &#183; File browser + editor &#183; Stats &#8212; kernel threads, immediate-mode drawing</text>
+
+  <!-- WM -->
+  <rect class="node" x="40" y="162" width="620" height="60" rx="12"/>
+  <text x="60" y="188" class="lbl" font-size="16" font-weight="600">Window manager / compositor</text>
+  <text x="60" y="208" class="sub" font-size="12">z-order list &#183; top-down hit-testing &#183; drag/resize/focus &#183; painter&#8217;s algorithm per dirty rect</text>
+
+  <!-- Filesystem -->
+  <rect class="node" x="40" y="236" width="620" height="60" rx="12"/>
+  <text x="60" y="262" class="lbl" font-size="16" font-weight="600">Filesystem</text>
+  <text x="60" y="282" class="sub" font-size="12">SimpleFS (superblock &#183; 2 bitmaps &#183; inodes) &#8594; LRU block cache &#8594; ATA PIO driver</text>
+
+  <!-- Input -->
+  <rect class="node" x="40" y="310" width="620" height="60" rx="12"/>
+  <text x="60" y="336" class="lbl" font-size="16" font-weight="600">Input drivers</text>
+  <text x="60" y="356" class="sub" font-size="12">PS/2 keyboard IRQ1 &#183; PS/2 mouse IRQ12 &#183; COM1 serial IRQ4 &#8594; lock-free SPSC rings</text>
+
+  <!-- Graphics -->
+  <rect class="node" x="40" y="384" width="620" height="60" rx="12"/>
+  <text x="60" y="410" class="lbl" font-size="16" font-weight="600">Graphics</text>
+  <text x="60" y="430" class="sub" font-size="12">linear framebuffer &#183; software back buffer &#183; 2D primitives &#183; dirty-rect union tracking</text>
+
+  <!-- Scheduler -->
+  <rect class="node" x="40" y="458" width="620" height="60" rx="12"/>
+  <text x="60" y="484" class="lbl" font-size="16" font-weight="600">Preemptive scheduler</text>
+  <text x="60" y="504" class="sub" font-size="12">PIT 100Hz &#8594; schedule() &#8594; naked-fn context switch &#183; round-robin &#183; guarded per-task stacks</text>
+
+  <!-- Interrupts -->
+  <rect class="node" x="40" y="532" width="620" height="60" rx="12"/>
+  <text x="60" y="558" class="lbl" font-size="16" font-weight="600">Interrupts &amp; exceptions</text>
+  <text x="60" y="578" class="sub" font-size="12">IDT &#183; GDT + TSS with IST-backed double-fault stack &#183; 8259 PIC remapped to vectors 32-47</text>
+
+  <!-- Memory -->
+  <rect class="node" x="40" y="606" width="620" height="60" rx="12"/>
+  <text x="60" y="632" class="lbl" font-size="16" font-weight="600">Memory manager</text>
+  <text x="60" y="652" class="sub" font-size="12">bump &#8594; bitmap frame allocator &#183; OffsetPageTable &#183; 8 MiB heap &#183; unmapped guard pages</text>
+
+  <!-- Boot -->
+  <rect class="node amber" x="40" y="680" width="620" height="56" rx="12"/>
+  <text x="60" y="705" class="lbl" font-size="16" font-weight="600">Boot</text>
+  <text x="60" y="724" class="sub" font-size="12">bootloader crate (BIOS) &#8594; BootInfo &#8594; entry_point!(kernel_main) &#8212; bare metal, no OS beneath</text>
+
+  <!-- "built on" spine: one arrow up the whole stack -->
+  <path d="M688,730 L688,96" stroke="#6BA8C9" stroke-width="2" stroke-opacity=".35" fill="none" marker-end="url(#arrow)"/>
+  <text x="710" y="420" class="sub" font-size="11.5" transform="rotate(-90 710 420)" text-anchor="middle">each layer built on the one below</text>
+
+  <!-- ================= host-testable crates ================= -->
+  <rect class="node amber" x="748" y="88" width="312" height="430" rx="14" stroke-opacity=".75"/>
+  <text x="768" y="116" class="h" font-size="16">libs/* &#8212; host-testable crates</text>
+  <text x="768" y="136" class="sub" font-size="11.5">pure logic, no_std but built for the host too,</text>
+  <text x="768" y="152" class="sub" font-size="11.5">so <tspan fill="#e9f0f5">cargo test</tspan> covers it without QEMU</text>
+
+  <!-- ordered to track the layers they came from, so the ties barely cross -->
+  <rect class="node" x="768" y="168" width="272" height="46" rx="10"/>
+  <text x="784" y="188" class="lbl" font-size="13" font-weight="600">bedrock-fs</text>
+  <text x="784" y="205" class="sub" font-size="10.5">inode indexing &#183; bitmaps &#183; remount test</text>
+
+  <rect class="node" x="768" y="222" width="272" height="46" rx="10"/>
+  <text x="784" y="242" class="lbl" font-size="13" font-weight="600">bedrock-lru</text>
+  <text x="784" y="259" class="sub" font-size="10.5">O(1) cache &#183; 100k-op differential fuzz</text>
+
+  <rect class="node" x="768" y="276" width="272" height="46" rx="10"/>
+  <text x="784" y="296" class="lbl" font-size="13" font-weight="600">bedrock-input</text>
+  <text x="784" y="313" class="sub" font-size="10.5">PS/2 packet FSM &#183; stray-ACK regression</text>
+
+  <rect class="node" x="768" y="330" width="272" height="46" rx="10"/>
+  <text x="784" y="350" class="lbl" font-size="13" font-weight="600">bedrock-gfx</text>
+  <text x="784" y="367" class="sub" font-size="10.5">rect algebra &#183; dirty-rect union &#183; coverage test</text>
+
+  <rect class="node" x="768" y="384" width="272" height="60" rx="10" stroke-dasharray="4 3"/>
+  <text x="784" y="404" class="lbl" font-size="13" font-weight="600">bedrock-sched</text>
+  <text x="784" y="421" class="sub" font-size="10.5">MLFQ policy &#183; starvation test + control</text>
+  <text x="784" y="437" class="sub" font-size="10.5" fill="#F2A25C">tested, not wired in &#8212; needs blocking first</text>
+
+  <rect class="node" x="768" y="452" width="272" height="46" rx="10"/>
+  <text x="784" y="472" class="lbl" font-size="13" font-weight="600">bedrock-mm</text>
+  <text x="784" y="489" class="sub" font-size="10.5">frame bitset &#183; no-double-alloc fuzz</text>
+
+  <!-- ties from crates back to the layers they were extracted from -->
+  <path class="tie" d="M768,191 C722,191 704,264 660,266"/>
+  <path class="tie" d="M768,245 C724,245 706,268 660,270"/>
+  <path class="tie" d="M768,299 C724,299 706,338 660,340"/>
+  <path class="tie" d="M768,353 C724,353 706,412 660,414"/>
+  <path class="tie" d="M768,414 C726,414 708,486 660,488"/>
+  <path class="tie" d="M768,475 C720,475 704,634 660,636"/>
+
+  <!-- ================= verification note ================= -->
+  <rect class="node" x="748" y="538" width="312" height="198" rx="14"/>
+  <text x="768" y="566" class="h2" font-size="15">What stays in the kernel</text>
+  <text x="768" y="590" class="sub" font-size="11.5">interrupt handlers &#183; inline assembly</text>
+  <text x="768" y="608" class="sub" font-size="11.5">port I/O &#183; MMIO &#183; the context switch</text>
+  <text x="768" y="626" class="sub" font-size="11.5">None of it can run on a host, so it is</text>
+  <text x="768" y="644" class="sub" font-size="11.5">verified by booting under QEMU with</text>
+  <text x="768" y="662" class="sub" font-size="11.5">captured serial logs.</text>
+  <line x1="768" y1="678" x2="1040" y2="678" stroke="#2b3a47" stroke-width="1"/>
+  <text x="768" y="700" class="lbl" font-size="12.5">67 host tests &#183; 6 crates</text>
+  <text x="768" y="720" class="sub" font-size="11.5">fmt + clippy + cross-build in CI</text>
+</svg>

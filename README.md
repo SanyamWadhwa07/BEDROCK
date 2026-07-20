@@ -1,4 +1,16 @@
-# Bedrock
+<div align="center">
+
+<img src="docs/assets/banner.svg" alt="Bedrock" width="100%"/>
+
+<br/>
+
+[![Rust](https://img.shields.io/badge/Rust-nightly%20·%20no__std-000000?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Target](https://img.shields.io/badge/target-x86__64--unknown--none-F2A25C?style=flat)](#quickstart)
+[![Ring](https://img.shields.io/badge/ring%200-monolithic%20kernel-6BA8C9?style=flat)](#what-this-is--is-not)
+[![Tests](https://img.shields.io/badge/host%20tests-67%20passing-3FB950?style=flat)](#testing)
+[![CI](https://github.com/SanyamWadhwa07/BEDROCK/actions/workflows/ci.yml/badge.svg)](https://github.com/SanyamWadhwa07/BEDROCK/actions/workflows/ci.yml)
+
+</div>
 
 A `no_std` Rust operating system kernel, booted from bare metal with no Linux (or any other OS) underneath: its own bootloader integration, physical/virtual memory manager, interrupt handling, preemptive scheduler, framebuffer graphics stack with dirty-rect compositing, PS/2 input drivers, a window manager, and native GUI apps (a terminal, a combined file browser/text editor) backed by a real on-disk filesystem over a hand-rolled ATA PIO driver.
 
@@ -31,6 +43,12 @@ Two caveats stated up front rather than buried: absolute frame time varies by mo
 **Is not:** a Linux distribution, a hypervisor guest OS, or anything with process isolation or a security boundary between "apps." Every window-manager app in this kernel could read every other task's memory if it wanted to -- there is no MMU-enforced separation between tasks, only cooperative convention.
 
 ## Architecture
+
+<div align="center">
+<img src="docs/assets/architecture.svg" alt="Bedrock kernel layer stack and host-testable crates" width="100%"/>
+</div>
+
+The same thing as text, if you prefer to grep it:
 
 ```
 Native Apps: Terminal | File Browser + Text Editor   (kernel threads, immediate-mode drawing)
@@ -103,6 +121,12 @@ All numbers below were captured in this project's actual development sandbox: QE
 
 Everything marked Phase 9 comes from the `bench` and `metrics` commands built into the shipped kernel, so anyone who boots it can reproduce them. Cycle-level timings go through a TSC calibrated against the PIT at boot, cross-checked against raw tick counts.
 
+The two paths those numbers describe, end to end:
+
+<div align="center">
+<img src="docs/assets/dataflow.svg" alt="Bedrock hot paths: input from IRQ to pixels, and storage from app to disk" width="100%"/>
+</div>
+
 ### Block cache, on versus off
 
 The same `bench fs` workload (create, write 64 KiB, read back, list, delete), run in one boot with the cache warm and then with `fscache off`. The point of the comparison is that it is one-sided in exactly the way write-through predicts: reads collapse, writes barely move.
@@ -171,7 +195,10 @@ Everything else on the earlier "not yet measured" list is now in the tables abov
 
 ```
 kernel/         the kernel itself (see kernel/src/{memory,task,graphics,input,wm,fs}/)
+libs/           host-testable no_std crates: bedrock-{mm,gfx,input,lru,fs,sched}
 xtask/          build + QEMU launch tooling (`cargo xtask run`)
+docs/benchmarks/  raw serial captures behind every number quoted above
+docs/assets/    banner.svg · architecture.svg · dataflow.svg
 PLAN.md         the full phased build plan and a detailed, dated progress log with every
                 real bug found during bring-up and how it was diagnosed and fixed
 DESIGN.md       locked design decisions, the hardest components explained, the DSA map,
