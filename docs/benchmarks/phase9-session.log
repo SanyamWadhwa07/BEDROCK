@@ -1,0 +1,111 @@
+INFO : Framebuffer info: FrameBufferInfo { byte_len: 2764800, width: 1280, height: 720, pixel_format: Bgr, bytes_per_pixel: 3, stride: 1280 }
+INFO : 4th Stage
+INFO : BiosInfo { stage_4: Region { start: 130000, len: 24290 }, kernel: Region { start: 1000000, len: 3bcc8 }, ramdisk: Region { start: 103c000, len: 0 }, config_file: Region { start: 103c000, len: 0 }, last_used_addr: 103bfff, framebuffer: BiosFramebufferInfo { region: Region { start: fd000000, len: 2a3000 }, width: 500, height: 2d0, bytes_per_pixel: 3, stride: 500, pixel_format: Bgr }, memory_map_addr: 11cb0, memory_map_len: 7 }
+INFO : BIOS boot
+INFO : Elf file loaded at Pointer {
+    addr: 0x0000000001000000,
+    metadata: 244936,
+}
+INFO : virtual_address_offset: 0x10000000000
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: f724, mem_size: f724, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: f730, virtual_addr: 10730, physical_addr: 10730, file_size: 18baf, mem_size: 18baf, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 282e0, virtual_addr: 2a2e0, physical_addr: 2a2e0, file_size: 73c8, mem_size: 7d20, align: 1000 })
+INFO : Mapping bss section
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 2f6b0, virtual_addr: 326b0, physical_addr: 326b0, file_size: 1488, mem_size: 68f0, align: 1000 })
+INFO : Mapping bss section
+INFO : Entry point at: 0x1000001bca0
+INFO : Creating GDT at PhysAddr(0x1069000)
+INFO : Map framebuffer
+INFO : Map physical memory
+INFO : Allocate bootinfo
+INFO : Create Memory Map
+INFO : Create bootinfo
+INFO : Jumping to kernel entry point at VirtAddr(0x1000001bca0)
+Bedrock kernel booting...
+GDT/TSS, IDT, and PIC remap initialized.
+Heap initialized: 8388608 bytes at 0x444444440000.
+Frame allocator: 29441 free / 32736 total frames.
+SimpleFS mounted: 1024 blocks total, 1020 data blocks.
+Scheduler initialized with 7 tasks (including boot task).
+PS/2 mouse enabled (streaming, IRQ12).
+Timer armed, IRQs unmasked (0/1/2/4/12), interrupts enabled.
+TSC calibrated against PIT: ~4945564 cycles/ms (~4945 MHz effective).
+Bedrock: entering serial shell. Try 'help'.
+
+bedrock> uptime
+up 20.30s (2030 timer ticks)
+bedrock> tasks
+7 tasks (cpu% = ticks_run share since boot):
+  task 0: Running, 63 switches, 315 ticks run (~14%)
+  task 1: Ready, 63 switches, 315 ticks run (~14%)
+  task 2: Ready, 63 switches, 315 ticks run (~14%)
+  task 3: Ready, 63 switches, 315 ticks run (~14%)
+  task 4: Ready, 63 switches, 315 ticks run (~14%)
+  task 5: Ready, 63 switches, 315 ticks run (~14%)
+  task 6: Ready, 63 switches, 315 ticks run (~14%)
+bedrock> metrics
+compositor: 5 fps, frame time 13579 us (last) / 14483 us (1s max), 135 frames total, mode: dirty-rect
+input latency (mouse IRQ -> pixels presented): 0 us last, 0 us avg
+block cache: on, 0 hits / 3 misses, 3/64 blocks resident
+bedrock> bench ctxswitch
+bench ctxswitch: 100000 ping-pong round trips (interrupts off)...
+  200000 one-way switches: ~269 cycles (~54 ns) per switch
+bedrock> bench alloc
+bench alloc: 200 rounds of Box/Vec churn + 16 frame alloc/free...
+  14400 alloc/free ops in 10.752ms -> ~1339285 ops/s
+bedrock> bench fs
+bench fs: create/write/read/list/delete of a 64 KiB file...
+  create: 326740 us
+  write:  3646518 us (64 KiB -> ~17 KiB/s)
+  read:   728 us (64 KiB -> ~87912 KiB/s)
+  list:   349 us (1 entries)
+  delete: 2297549 us
+  block cache: ON (67 hits / 5 misses this boot)
+bedrock> bench fs
+bench fs: create/write/read/list/delete of a 64 KiB file...
+  create: 12204 us
+  write:  1284509 us (64 KiB -> ~49 KiB/s)
+  read:   125 us (64 KiB -> ~512000 KiB/s)
+  list:   51 us (1 entries)
+  delete: 866899 us
+  block cache: ON (136 hits / 5 misses this boot)
+bedrock> fscache off
+block cache disabled (and emptied)
+bedrock> bench fs
+bench fs: create/write/read/list/delete of a 64 KiB file...
+  create: 13466 us
+  write:  1689687 us (64 KiB -> ~37 KiB/s)
+  read:   305428 us (64 KiB -> ~209 KiB/s)
+  list:   2958 us (1 entries)
+  delete: 1032961 us
+  block cache: OFF (136 hits / 5 misses this boot)
+bedrock> fscache on
+block cache enabled
+bedrock> bench ata
+bench ata: 256 KiB sequential raw write+read (PIO, no cache)...
+  write: 256 KiB in 2927.797ms -> ~87 KiB/s  (PIT cross-check: ~3160ms)
+  read : 256 KiB in 675.796ms -> ~378 KiB/s  (PIT cross-check: ~700ms)
+bedrock> redraw naive
+compositor: forcing full-screen redraw every frame
+bedrock> metrics
+compositor: 1 fps, frame time 679058 us (last) / 714616 us (1s max), 1997 frames total, mode: naive full redraw
+input latency (mouse IRQ -> pixels presented): 0 us last, 0 us avg
+block cache: on, 136 hits / 5 misses, 0/64 blocks resident
+bedrock> redraw dirty
+compositor: dirty-rect mode restored
+bedrock> metrics
+compositor: 5 fps, frame time 14303 us (last) / 14457 us (1s max), 2060 frames total, mode: dirty-rect
+input latency (mouse IRQ -> pixels presented): 0 us last, 0 us avg
+block cache: on, 136 hits / 5 misses, 0/64 blocks resident
+bedrock> frameinfo
+frames: 29382 free / 32736 total
+bedrock> tasks
+7 tasks (cpu% = ticks_run share since boot):
+  task 0: Running, 1074 switches, 5370 ticks run (~14%)
+  task 1: Ready, 1074 switches, 5370 ticks run (~14%)
+  task 2: Ready, 1074 switches, 5370 ticks run (~14%)
+  task 3: Ready, 1074 switches, 5370 ticks run (~14%)
+  task 4: Ready, 1074 switches, 5370 ticks run (~14%)
+  task 5: Ready, 1074 switches, 5370 ticks run (~14%)
+  task 6: Ready, 1074 switches, 5370 ticks run (~14%)
+bedrock> 

@@ -45,23 +45,44 @@ ATA PIO over the legacy fixed ports (0x1F0-0x1F7, plus 0x3F6 for the alternate-s
 
 **A real bug worth calling out specifically**: this driver is polling-only by design (that's the entire point of PIO), and never touches interrupts on purpose -- but every real ATA controller still raises IRQ14 on its own after each command completes, *regardless* of whether the driver asked for interrupt-driven operation. IRQ14 was masked at the PIC (only the timer, keyboard, PIC cascade, and mouse IRQs are ever unmasked), which in theory should have made this harmless -- but empirically, the very first time interrupts were ever globally enabled after any ATA operation had run, the kernel double-faulted, reproducibly. The fix was to explicitly set the "no interrupt enable" (nIEN) bit in the ATA device control register before any transfer, silencing the controller's own IRQ14 generation entirely. Bisection to find this took longer than the fix itself -- see PLAN.md's Phase 7 log for the full diagnostic trail (it was found by systematically ruling out the just-changed task-stack size and the SimpleFS call depth first, before narrowing it down to *any* single raw `ata::read_sector` call, and finally to the specific missing register write).
 
+### 7. The LRU block cache
+
+Every SimpleFS block access used to be eight polled PIO sector round trips, which is why the Phase 7 throughput numbers were what they were. The cache sits between SimpleFS and the ATA driver and holds 64 blocks (256 KiB of the 8 MiB heap), enough for all four metadata blocks plus a working set.
+
+It is **write-through**: writes reach the disk before returning, and the cache is updated only after the disk write succeeds. That is a deliberate choice rather than a placeholder. SimpleFS has no journal, so a write-back cache would introduce a window where the on-disk state is older than what the filesystem believes it wrote, and answering "what does the disk look like after a crash here" honestly would require ordering guarantees the filesystem was never designed to make. Write-through keeps durability exactly as it was before the cache existed. The cost is visible and one-sided: reads get dramatically faster, writes get nothing at all. The benchmark table in the README shows both halves of that trade rather than only the flattering one.
+
+The cache can be toggled at runtime (`fscache on|off`), which is what makes the A/B measurement possible in a single boot instead of requiring two builds.
+
+The eviction structure itself is the textbook interview answer, implemented for real: an open-addressing hash table from block number to arena slot, plus a doubly-linked list over those slots ordering them from most to least recently used. The hash table uses backward-shift deletion rather than tombstones, so a long-running kernel never accumulates dead probe-chain entries. Because it is a plain `no_std` crate, the whole thing is checked against a naive reference model over 100,000 randomized operations under `cargo test`.
+
+### 8. Serial input, and two bugs that only appear once the kernel is preemptive
+
+The serial shell originally polled the UART from task context. That is fine in a single-tasking kernel and quietly wrong in this one: the shell is one of seven round-robin tasks, so it is descheduled for roughly six sevenths of every rotation, and the 16550's receive register is overwritten by the next arriving byte long before the shell runs again. Typing slowly by hand hid this completely. Scripting a command into the console did not, and the fix is the same one the keyboard and mouse already used, which is to move reception into an ISR (IRQ4) that runs regardless of which task holds the CPU, feeding the same lock-free SPSC ring buffer.
+
+Moving to interrupts exposed a second, more specific bug underneath. `uart_16550`'s `init()` leaves the receive FIFO trigger level at 14 bytes, meaning the UART raises IRQ4 only once 14 bytes have accumulated. Anything shorter, or the tail of anything longer, sits in the FIFO below the threshold and raises nothing at all. The symptom was precise enough to name the cause: `bench ctxswitch\n` arrived as exactly `bench ctxswitc`, 14 bytes through and the newline that would have submitted the line stranded behind them. Dropping the trigger level to one byte fixes it. The 16550 does define a character timeout interrupt for exactly this situation, but depending on it means trusting an emulated corner case, and the handler drains in a loop regardless, so the FIFO still absorbs bursts.
+
+Both of these belong in the same family as the Phase 3 serial lock convoy and the Phase 5 mouse ACK ordering bug: code that is correct for a single-tasking, polled kernel, and quietly wrong once real preemption and real interrupts exist underneath it.
+
 ## DSA & algorithms map
 
 Every core component is built on a *named*, classic data structure or algorithm -- cite these by name when walking through the project:
 
 | Component | Named DSA / algorithm | Where |
 |---|---|---|
-| Physical frame allocator | **Bitset / bitmap** (bit manipulation: `idx/8`, `1 << (idx%8)`), rotating-cursor scan to amortize O(n) | `kernel/src/memory/frame_allocator.rs` |
+| Physical frame allocator | **Bitset / bitmap** (bit manipulation: `idx/8`, `1 << (idx%8)`), rotating-cursor scan to amortize O(n), skipping fully-allocated bytes eight frames at a time | `libs/bedrock-mm/` (logic, host-tested), `kernel/src/memory/frame_allocator.rs` (address arithmetic) |
 | Kernel heap | **Free-list allocation** (`linked_list_allocator`) over pages mapped by the frame allocator | `kernel/src/memory/heap.rs` |
 | Scheduler | **Round-robin circular queue** (`VecDeque` rotation of task indices), O(1) enqueue/dequeue | `kernel/src/task/scheduler.rs` |
 | Context switch | **Callee-saved register contract** (System V AMD64 ABI) + fabricated stack frames | `kernel/src/task/context_switch.rs` |
-| Dirty-rect compositing | **Interval/rectangle union** (bounding-box merge with a fragmentation cap + full-redraw fallback) + **painter's algorithm** (back-to-front z-order composite) | `kernel/src/graphics/dirty_rect.rs`, `kernel/src/wm/wm.rs` |
-| Input event queues | **Lock-free SPSC ring buffer** (circular buffer, atomic head/tail -- single-producer ISR, single-consumer task) | `kernel/src/input/event_queue.rs` |
-| PS/2 mouse protocol | **Finite state machine** with sync-bit recovery (3-byte packet reassembly, two's-complement deltas) | `kernel/src/input/mouse.rs` |
+| Dirty-rect compositing | **Interval/rectangle union** (bounding-box merge with a fragmentation cap + full-redraw fallback) + **painter's algorithm** (back-to-front z-order composite) | `libs/bedrock-gfx/` (logic, host-tested), `kernel/src/wm/wm.rs` (compositing) |
+| Input event queues | **Lock-free SPSC ring buffer** (circular buffer, atomic head/tail -- single-producer ISR, single-consumer task). Backs the keyboard, mouse, *and* serial receive paths | `kernel/src/input/event_queue.rs` |
+| PS/2 mouse protocol | **Finite state machine** with sync-bit recovery (3-byte packet reassembly, two's-complement deltas) | `libs/bedrock-input/` (logic, host-tested), `kernel/src/input/mouse.rs` (8042 port I/O) |
+| Filesystem block cache | **LRU cache**: open-addressing hash table (linear probing, backward-shift deletion) plus an arena-backed doubly-linked list, O(1) get/put/evict | `libs/bedrock-lru/` (logic, host-tested), `kernel/src/fs/cache.rs` (write-through policy) |
 | Window manager | **Z-order list** + top-down **hit-testing** (point-in-rect search) | `kernel/src/wm/zorder.rs` |
 | SimpleFS | **Inode tree indexing** (direct + single-indirect blocks = shallow B-tree-like fanout), **two bitmaps** for free-space tracking, directory as an association list | `kernel/src/fs/simplefs.rs` |
 
-**Not implemented this session** (named as explicit future work, not silently skipped): an LRU block cache for the filesystem (hashmap + doubly-linked list, O(1) get/evict -- would directly address the ATA throughput numbers in the README), and an MLFQ (multilevel feedback queue) scheduler upgrade.
+The four crates under `libs/` are `no_std` but also build for the host, so `cargo test` covers them without QEMU. Only code that genuinely needs the target stayed in the kernel binary: interrupt handlers, inline assembly, port I/O, and MMIO.
+
+**Still not implemented** (named as explicit future work, not silently skipped): an MLFQ (multilevel feedback queue) scheduler upgrade, a write-back mode for the block cache (which needs a crash-consistency story SimpleFS does not have), and splitting SimpleFS's inode and directory logic into a host-testable crate the way the other four were.
 
 ## Interview-defense checklist
 
@@ -69,7 +90,9 @@ Every core component is built on a *named*, classic data structure or algorithm 
 2. Bitmap physical allocator vs. buddy -- bitmap + a cursor hint is simpler, and buddy's actual benefit (efficient variable-size allocation) doesn't apply to fixed 4KiB frames.
 3. PIC vs. APIC / no SMP -- PIC is right-sized for single-core; APIC only matters once there's more than one core to route interrupts to.
 4. Monolithic ring-0-only kernel vs. a Redox-style microkernel with ring-3 isolation -- the single biggest named scope cut in the whole project; know exactly what syscalls, per-process `CR3`, and ELF loading would cost, traded deliberately for a complete GUI stack instead.
-5. Dirty-rect compositing vs. naive full redraw -- real bookkeeping complexity taken on specifically for a benchmarkable perf win, not because it was the easy path.
+5. Dirty-rect compositing vs. naive full redraw -- real bookkeeping complexity taken on specifically for a benchmarkable perf win, not because it was the easy path. `redraw naive` forces the strawman at runtime, so the claim is measurable rather than asserted.
 6. Custom on-disk filesystem vs. FAT32 -- original design/recovery-story signal vs. a spec-implementation exercise.
-7. ATA PIO vs. AHCI/DMA -- a deliberate, honestly-acknowledged scope cut, directly visible in the throughput benchmark in the README.
+7. ATA PIO vs. AHCI/DMA -- a deliberate, honestly-acknowledged scope cut, directly visible in the throughput benchmark in the README. The block cache is what made it survivable for reads; writes still pay the full PIO cost by design, and the benchmark table shows both sides.
 8. The nIEN/IRQ14 bug (see "the hardest components" above) -- a good example of a bug that pure code review would never have caught, because the driver code itself was "correct" for what it intended to do; it only surfaced by actually booting and enabling interrupts for real.
+9. Write-through vs. write-back caching -- know why the safe choice was the right one here specifically (no journal, so no way to answer the crash-ordering question honestly) rather than in general.
+10. Splitting `libs/*` out for host testing -- know exactly where the line falls. Pure logic (bit twiddling, rect algebra, packet decoding, eviction order) moves out and gets randomized tests; port I/O, ISRs, inline assembly, and MMIO cannot and stay in the kernel, verified by booting.
