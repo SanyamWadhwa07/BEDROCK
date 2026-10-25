@@ -95,25 +95,6 @@ A serial debug shell runs on COM1 alongside the GUI, driven by IRQ4 rather than 
 
 The benchmarks are wired into the shipped kernel rather than living in a temporary harness that gets deleted after capture, which is how the earlier phases' numbers were produced.
 
-## Known limitations (honest, not hidden)
-
-- **No ring-3 isolation.** Every task is a trusted kernel thread; see "What this is / is not" above.
-- **No SMP.** Single core, legacy 8259 PIC rather than APIC -- APIC only pays off once there's more than one core to route interrupts to.
-- **No swap, no demand paging.** All mapped memory is resident.
-- **BIOS boot only.** UEFI was scoped as an explicit stretch goal and not attempted this session.
-- **ATA PIO, not AHCI/DMA.** Simple, correct, and slow by design -- see the benchmarks below. A real driver moving real workloads would want DMA.
-- **SimpleFS is not crash-safe/journaled**, and its root directory is flat (a single fixed data block, no subdirectories) -- a deliberate scope cut to keep Phase 7 focused on proving read+write+persistence end-to-end. The inode format (direct + single-indirect block pointers) supports a general directory tree if that's ever extended.
-- **Write-through block cache, no write-back.** Reads are served from an LRU block cache; writes always reach the disk before returning. That keeps durability identical to having no cache at all, and it also means writes get no speedup whatsoever from the cache. A write-back cache with an explicit flush would be the next step, and it needs a crash-consistency story SimpleFS does not currently have.
-- **The kernel schedules round-robin, not MLFQ.** A full multilevel feedback queue (priority levels with per-level quanta, demotion on slice exhaustion, periodic priority boost) is implemented and tested in `libs/bedrock-sched`, and it was wired into the kernel and booted. It is not shipped wired in, for a reason worth stating precisely.
-
-  MLFQ infers priority from whether a task gives the CPU up early. This kernel has no blocking primitive: no sleep, no wait queues, no blocked task state. Tasks that are waiting poll in a loop. So "yield when idle" is the only signal available, and a task that yields is immediately runnable again, which means the shell yield-spun its way to 174,729 context switches in 30 seconds. It did get what MLFQ promises (top priority at 2% CPU, against 14% and 75 switches under round-robin), but through busy-yielding rather than actually sleeping.
-
-  The honest fix is a blocked state and a wakeup path, at which point MLFQ has real information to work with. Wiring the policy in first would be putting the feedback loop on top of a signal that does not mean what it should.
-
-  Worth recording because I initially got this wrong: I first blamed MLFQ for a 20x frame-time regression, then measured the reverted round-robin build and found the same numbers. The frame time was sandbox variance, not the scheduler. The reason not to ship MLFQ is the busy-yielding, and nothing else.
-- **No FAT32 interop.** Read-only FAT32 support was scoped as an optional stretch and not attempted -- SimpleFS is the only filesystem this kernel understands.
-
-None of the above are oversights discovered late -- they're the scope cuts named up front in [DESIGN.md](DESIGN.md), traded deliberately for finishing a complete, working GUI stack end to end.
 
 ## Benchmarks
 
@@ -155,25 +136,6 @@ Design decision #5 was the bet that dirty-rect bookkeeping pays for itself. `red
 The absolute FPS is low in both modes for the same reason everything else here is slow: no hardware acceleration, and the compositor is one of seven round-robin tasks sharing a single emulated core.
 
 **Read the ratio, not the absolute frame time.** Both rows above come from one boot, minutes apart, which is the only reason they can be compared. Across *different* boots the same unmodified code has measured anywhere from 14ms to 329ms per frame in this sandbox, with no stray QEMU processes and the host under 15% load. TCG throughput depends on host scheduling in ways nothing inside the kernel controls. Any single frame-time number here is worth very little on its own; an A/B captured back-to-back in one boot is worth something.
-
-### Everything else
-
-| Phase | Metric | Result | Method |
-|---|---|---|---|
-| 2 | Frame allocator reclamation | Free-frame count identical before/after `alloctest` (30370 -> 30370 in one capture) after fuzzed alloc/free-out-of-order | Shell `alloctest` command, frame counts printed before/after |
-| 2 | Page-fault fault-injection | Deliberate write to an unmapped page caught cleanly, exact faulting `CR2` printed, no corruption | Shell `fault page` |
-| 3 | Scheduler fairness | Five always-running tasks (no voluntary yield) interleave proportionally to their own busy-loop delay under round-robin preemption; two-task ping-pong correctness confirmed | Serial capture of per-task counters across two full rotation cycles |
-| 9 | Scheduler fairness, quantified | All 7 tasks landed on identical counters: 63 switches and 315 ticks each, **14% CPU apiece**, with no task drifting from the others | Shell `tasks`, which reports per-task switch counts and CPU share |
-| 9 | **Context-switch latency** | **~269 cycles, ~54 ns**, per one-way switch | 100,000 ping-pong round trips (200,000 switches) against a dedicated fiber with interrupts off, bypassing the scheduler entirely. Shell `bench ctxswitch` |
-| 9 | Allocator throughput | 14,400 alloc/free ops in 10.75ms -> **~1.34M ops/s** | 200 rounds of Box/Vec churn plus 16 frame alloc/free each. Shell `bench alloc` |
-| 7/9 | ATA PIO sequential write | 256 KiB in 2.93s -> **~87 KiB/s** (PIT cross-check: 3.16s) | 64 sequential 4KiB-block writes to a scratch region past the filesystem. Shell `bench ata` |
-| 7/9 | ATA PIO sequential read | 256 KiB in 0.68s -> **~378 KiB/s** (PIT cross-check: 0.70s) | 64 sequential 4KiB-block reads, same methodology. This is the raw floor the block cache above is measured against |
-| 7 | Filesystem persistence | A file written on one QEMU boot was read back correctly, byte-for-byte, by a second independent QEMU process against the same disk image | `fs.img` reused across boots; verified via a temporary self-test, see PLAN.md's Phase 7 log |
-| Whole project | Cold boot to shell-ready | **~9.9s** (release build) | Host-side wall-clock timestamp at QEMU launch vs. the `entering serial shell` log line |
-
-**Still not measured** (honest gaps, not fabricated numbers): PS/2 input latency and frame time under active drag/resize. The instrumentation for both exists and ships (`metrics` reports mouse-IRQ-to-presented-pixel latency, stamped in the IRQ12 handler and closed out just after `present()`), but capturing them needs a human moving a real mouse. The sandbox these numbers were taken in runs QEMU headless, where nothing generates mouse packets, so `metrics` honestly reports 0. Anyone running this with a display can read the real figure straight off the Stats window.
-
-Everything else on the earlier "not yet measured" list is now in the tables above. Context-switch latency in particular was scoped out in Phase 8 as too risky to instrument; the approach that worked avoided touching `switch_to`'s assembly at all, ping-ponging against a dedicated fiber outside the scheduler instead.
 
 ## Testing
 
